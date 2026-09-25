@@ -18,6 +18,14 @@ const DATA_FILE = process.env.DATA_FILE || path.join(__dirname, 'data.json');
 const PUBLIC_DIR = path.join(__dirname, 'public');
 const DEMO = !API_KEY;
 
+// Email for PIN reset codes. Sent over HTTPS APIs (Railway blocks SMTP on Hobby plans).
+// Brevo works without owning a domain; Resend needs a verified domain to email anyone but you.
+const BREVO_API_KEY = process.env.BREVO_API_KEY || '';
+const RESEND_API_KEY = process.env.RESEND_API_KEY || '';
+const MAIL_FROM = process.env.MAIL_FROM || '';
+const MAIL_FROM_NAME = process.env.MAIL_FROM_NAME || 'Parlay Room';
+const EMAIL_ON = !!((BREVO_API_KEY || RESEND_API_KEY) && MAIL_FROM);
+
 // ---------------------------------------------------------------- sports & markets
 
 const GAME_MARKETS = [
@@ -114,12 +122,56 @@ function newInviteCode() {
 }
 
 function groupView(g) {
-  const members = g.memberIds
+  const people = (ids) => (ids || [])
     .map((id) => db.members.find((m) => m.id === id))
-    .filter(Boolean)
-    .map((m) => ({ id: m.id, name: m.name, isLeader: m.id === g.leaderId }));
+    .filter(Boolean);
+  const members = people(g.memberIds).map((m) => ({ id: m.id, name: m.name, isLeader: m.id === g.leaderId }));
+  const removed = people(g.bannedIds).map((m) => ({ id: m.id, name: m.name }));
   const book = bookFor(g);
-  return { id: g.id, name: g.name, code: g.code, leaderId: g.leaderId, members, sportsbook: { key: book.key, title: book.title } };
+  return {
+    id: g.id, name: g.name, code: g.code, leaderId: g.leaderId, members, removed,
+    sportsbook: { key: book.key, title: book.title },
+  };
+}
+
+const normalizeEmail = (e) => String(e || '').trim().toLowerCase();
+const validEmail = (e) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(e) && e.length <= 254;
+const memberByEmail = (e) => db.members.find((m) => m.email && m.email === e);
+
+async function sendEmail(to, subject, text) {
+  if (!EMAIL_ON) return false;
+  const html = `<div style="font-family:Arial,sans-serif;font-size:16px;line-height:1.5">${text
+    .split('\n').map((l) => l.replace(/[<>&]/g, (c) => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;' }[c]))).join('<br>')}</div>`;
+  const res = BREVO_API_KEY
+    ? await fetch('https://api.brevo.com/v3/smtp/email', {
+      method: 'POST',
+      headers: { 'api-key': BREVO_API_KEY, 'Content-Type': 'application/json', Accept: 'application/json' },
+      body: JSON.stringify({ sender: { name: MAIL_FROM_NAME, email: MAIL_FROM }, to: [{ email: to }], subject, textContent: text, htmlContent: html }),
+    })
+    : await fetch('https://api.resend.com/emails', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${RESEND_API_KEY}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ from: `${MAIL_FROM_NAME} <${MAIL_FROM}>`, to: [to], subject, text, html }),
+    });
+  if (!res.ok) {
+    console.error(`Email send failed (${res.status}): ${(await res.text()).slice(0, 300)}`);
+    throw Object.assign(new Error("Couldn't send the email right now. Try again in a minute."), { status: 502 });
+  }
+  return true;
+}
+
+// Per-account lockout on top of the per-IP limit.
+const accountLocked = (m) => m.lockedUntil && m.lockedUntil > Date.now();
+function noteBadPin(m) {
+  m.failCount = (m.failCount || 0) + 1;
+  if (m.failCount >= 8) { m.lockedUntil = Date.now() + 15 * 60 * 1000; m.failCount = 0; }
+  save();
+}
+
+function newSession(member) {
+  const token = crypto.randomBytes(24).toString('base64url');
+  db.sessions[token] = member.id;
+  return token;
 }
 
 migrateSingleGroup();
@@ -290,24 +342,93 @@ async function handleApi(req, res, url) {
     return send(res, status, { error });
   };
 
+  const validPin = (pin) => /^\d{4,8}$/.test(String(pin || ''));
+
+  if (pathname === '/api/signup' && req.method === 'POST') {
+    if (tooManyTries()) return send(res, 429, { error: 'Too many tries. Wait 15 minutes.' });
+    const { name, email, pin } = await readBody(req);
+    const cleanName = String(name || '').trim().slice(0, 24);
+    const cleanEmail = normalizeEmail(email);
+    if (!cleanName) return send(res, 400, { error: 'Enter your name.' });
+    if (!validEmail(cleanEmail)) return send(res, 400, { error: 'Enter a valid email address.' });
+    if (!validPin(pin)) return send(res, 400, { error: 'PIN must be 4–8 digits.' });
+    if (memberByEmail(cleanEmail)) return send(res, 409, { error: 'That email already has an account. Sign in, or use Forgot PIN.' });
+    const salt = newId();
+    const member = { id: newId(), name: cleanName, email: cleanEmail, salt, pinHash: hashPin(pin, salt), joinedAt: new Date().toISOString() };
+    db.members.push(member);
+    const token = newSession(member);
+    save();
+    return send(res, 201, { token });
+  }
+
   if (pathname === '/api/login' && req.method === 'POST') {
     if (tooManyTries()) return send(res, 429, { error: 'Too many tries. Wait 15 minutes.' });
-    const { name, pin } = await readBody(req);
-    const cleanName = String(name || '').trim().slice(0, 24);
-    if (!cleanName) return send(res, 400, { error: 'Enter a name.' });
-    if (!/^\d{4,8}$/.test(String(pin || ''))) return send(res, 400, { error: 'PIN must be 4–8 digits.' });
-
-    let member = db.members.find((m) => m.name.toLowerCase() === cleanName.toLowerCase());
-    if (member) {
-      if (hashPin(pin, member.salt) !== member.pinHash) return fail(403, `That PIN doesn't match ${member.name}. If that isn't you, pick another name.`);
-    } else {
-      const salt = newId();
-      member = { id: newId(), name: cleanName, salt, pinHash: hashPin(pin, salt), joinedAt: new Date().toISOString() };
-      db.members.push(member);
-    }
+    const { login, pin } = await readBody(req);
+    const id = String(login || '').trim();
+    if (!id) return send(res, 400, { error: 'Enter your email.' });
+    if (!validPin(pin)) return send(res, 400, { error: 'PIN must be 4–8 digits.' });
+    // Email for everyone; accounts made before email existed can still use their name once.
+    const member = id.includes('@')
+      ? memberByEmail(normalizeEmail(id))
+      : db.members.find((m) => !m.email && m.name.toLowerCase() === id.toLowerCase());
+    const wrong = id.includes('@') ? 'Wrong email or PIN.' : 'Wrong name or PIN.';
+    if (!member) return fail(403, wrong);
+    if (accountLocked(member)) return send(res, 429, { error: 'Too many wrong PINs. Wait 15 minutes, or use Forgot PIN.' });
+    if (hashPin(pin, member.salt) !== member.pinHash) { noteBadPin(member); return fail(403, wrong); }
     failedJoins.delete(ip);
-    const token = crypto.randomBytes(24).toString('base64url');
-    db.sessions[token] = member.id;
+    member.failCount = 0;
+    const token = newSession(member);
+    save();
+    return send(res, 200, { token });
+  }
+
+  if (pathname === '/api/forgot' && req.method === 'POST') {
+    if (tooManyTries()) return send(res, 429, { error: 'Too many tries. Wait 15 minutes.' });
+    const { email } = await readBody(req);
+    const cleanEmail = normalizeEmail(email);
+    if (!validEmail(cleanEmail)) return send(res, 400, { error: 'Enter the email on your account.' });
+    const sentMsg = { ok: true, message: 'If that email has an account, a 6-digit code is on its way. It works for 15 minutes.' };
+    const member = memberByEmail(cleanEmail);
+    if (!member) return send(res, 200, sentMsg); // don't reveal which emails have accounts
+    if (member.reset && member.reset.sentAt > Date.now() - 60 * 1000) {
+      return send(res, 429, { error: 'A code was just sent. Wait a minute before asking for another.' });
+    }
+    const code = String(crypto.randomInt(0, 1000000)).padStart(6, '0');
+    const salt = newId();
+    member.reset = { salt, codeHash: hashPin(code, salt), expires: Date.now() + 15 * 60 * 1000, tries: 0, sentAt: Date.now() };
+    save();
+    if (!EMAIL_ON) {
+      console.log(`[PIN reset] Email isn't configured. Code for ${member.email}: ${code}`);
+      return send(res, 503, { error: "Email isn't set up on this server yet, so a code can't be sent. Ask whoever runs the app." });
+    }
+    await sendEmail(member.email, `Your Parlay Room code: ${code}`,
+      `Hi ${member.name},\n\nYour Parlay Room PIN reset code is: ${code}\n\nIt expires in 15 minutes. If you didn't ask for this, ignore this email; your PIN hasn't changed.`);
+    return send(res, 200, sentMsg);
+  }
+
+  if (pathname === '/api/reset' && req.method === 'POST') {
+    if (tooManyTries()) return send(res, 429, { error: 'Too many tries. Wait 15 minutes.' });
+    const { email, code, pin } = await readBody(req);
+    const member = memberByEmail(normalizeEmail(email));
+    const r = member && member.reset;
+    if (!r || r.expires < Date.now() || r.tries >= 5) {
+      return fail(400, 'That code has expired. Ask for a new one.');
+    }
+    if (hashPin(String(code || '').trim(), r.salt) !== r.codeHash) {
+      r.tries += 1;
+      save();
+      return fail(400, r.tries >= 5 ? 'Too many wrong codes. Ask for a new one.' : "That code isn't right. Check the email and try again.");
+    }
+    if (!validPin(pin)) return send(res, 400, { error: 'New PIN must be 4–8 digits.' });
+    member.salt = newId();
+    member.pinHash = hashPin(pin, member.salt);
+    delete member.reset;
+    member.failCount = 0;
+    delete member.lockedUntil;
+    // Sign out every other device.
+    for (const [t, mid] of Object.entries(db.sessions)) if (mid === member.id) delete db.sessions[t];
+    failedJoins.delete(ip);
+    const token = newSession(member);
     save();
     return send(res, 200, { token });
   }
@@ -318,9 +439,19 @@ async function handleApi(req, res, url) {
   if (pathname === '/api/me') {
     const groups = db.groups.filter((g) => g.memberIds.includes(me.id)).map(groupView);
     return send(res, 200, {
-      me: { id: me.id, name: me.name }, groups, demo: DEMO, createNeedsCode: !!CREATE_CODE,
+      me: { id: me.id, name: me.name, email: me.email || null }, groups, demo: DEMO, createNeedsCode: !!CREATE_CODE,
       sportsbooks: SPORTSBOOKS.map(({ key, title }) => ({ key, title })),
     });
+  }
+
+  if (pathname === '/api/me/email' && req.method === 'POST') {
+    const cleanEmail = normalizeEmail((await readBody(req)).email);
+    if (!validEmail(cleanEmail)) return send(res, 400, { error: 'Enter a valid email address.' });
+    const owner = memberByEmail(cleanEmail);
+    if (owner && owner.id !== me.id) return send(res, 409, { error: 'That email is already on another account.' });
+    me.email = cleanEmail;
+    save();
+    return send(res, 200, { ok: true });
   }
 
   if (pathname === '/api/groups' && req.method === 'POST') {
@@ -343,6 +474,9 @@ async function handleApi(req, res, url) {
     const g = db.groups.find((x) => x.code === String(code || '').trim().toUpperCase());
     if (!g) return fail(404, 'No group has that invite code. Check it with your group leader.');
     failedJoins.delete(ip);
+    if ((g.bannedIds || []).includes(me.id)) {
+      return send(res, 403, { error: 'The group leader removed you from this group. Ask them to let you back in.' });
+    }
     if (!g.memberIds.includes(me.id)) g.memberIds.push(me.id);
     save();
     return send(res, 200, { group: groupView(g) });
@@ -385,7 +519,36 @@ async function handleApi(req, res, url) {
 
   if (group && sub === '/code' && req.method === 'POST') {
     if (!isLeader) return send(res, 403, { error: 'Only the group leader can change the invite code.' });
-    group.code = newInviteCode();
+    const { code } = await readBody(req);
+    if (code == null || code === '') {
+      group.code = newInviteCode();
+    } else {
+      const clean = String(code).trim().toUpperCase();
+      if (!/^[A-Z0-9]{4,12}$/.test(clean)) return send(res, 400, { error: 'Codes are 4–12 letters or numbers, no spaces.' });
+      if (db.groups.some((g) => g.id !== group.id && g.code === clean)) {
+        return send(res, 409, { error: 'Another group already uses that code. Try a different one.' });
+      }
+      group.code = clean;
+    }
+    save();
+    return send(res, 200, { group: groupView(group) });
+  }
+
+  if (group && sub === '/kick' && req.method === 'POST') {
+    if (!isLeader) return send(res, 403, { error: 'Only the group leader can remove people.' });
+    const { memberId } = await readBody(req);
+    if (memberId === me.id) return send(res, 400, { error: "You can't remove yourself. Use Leave group instead." });
+    if (!group.memberIds.includes(memberId)) return send(res, 404, { error: "That person isn't in this group." });
+    group.memberIds = group.memberIds.filter((id) => id !== memberId);
+    group.bannedIds = [...new Set([...(group.bannedIds || []), memberId])];
+    save();
+    return send(res, 200, { group: groupView(group) });
+  }
+
+  if (group && sub === '/unban' && req.method === 'POST') {
+    if (!isLeader) return send(res, 403, { error: 'Only the group leader can let people back in.' });
+    const { memberId } = await readBody(req);
+    group.bannedIds = (group.bannedIds || []).filter((id) => id !== memberId);
     save();
     return send(res, 200, { group: groupView(group) });
   }

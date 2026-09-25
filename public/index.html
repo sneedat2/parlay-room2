@@ -12,16 +12,76 @@
 <body>
   <!-- Sign in -->
   <main id="login" class="join" hidden>
-    <form id="login-form" class="join-card" autocomplete="off">
+    <div class="join-card">
       <p class="eyebrow">Group slip</p>
       <h1 class="brand">Parlay Room</h1>
       <p class="join-copy">Pick FanDuel props together, then load the whole slip into FanDuel with one tap.</p>
-      <label for="login-name">Your name</label>
-      <input id="login-name" maxlength="24" required>
-      <label for="login-pin">PIN <span class="hint">4–8 digits. New here? Pick one now.</span></label>
-      <input id="login-pin" inputmode="numeric" pattern="\d{4,8}" type="password" required>
-      <p id="login-error" class="error" role="alert" hidden></p>
-      <button class="btn primary" type="submit">Sign in</button>
+
+      <div class="mode-tabs" role="tablist" aria-label="Sign in or create account">
+        <button id="mode-signin" class="mode-tab" type="button" role="tab" aria-selected="true">Sign in</button>
+        <button id="mode-signup" class="mode-tab" type="button" role="tab" aria-selected="false">Create account</button>
+      </div>
+
+      <!-- Sign in -->
+      <form id="signin-form" class="auth-form">
+        <label for="signin-login">Email</label>
+        <input id="signin-login" type="text" inputmode="email" autocomplete="username" required>
+        <span class="hint">Made your account before emails? Enter your name instead.</span>
+        <label for="signin-pin">PIN</label>
+        <input id="signin-pin" inputmode="numeric" pattern="\d{4,8}" type="password" autocomplete="current-password" required>
+        <p id="signin-error" class="error" role="alert" hidden></p>
+        <button class="btn primary" type="submit">Sign in</button>
+        <button id="show-forgot" class="link-btn center" type="button">Forgot PIN?</button>
+      </form>
+
+      <!-- Create account -->
+      <form id="signup-form" class="auth-form" hidden>
+        <label for="signup-name">Your name <span class="hint">what your group sees</span></label>
+        <input id="signup-name" maxlength="24" autocomplete="nickname" required>
+        <label for="signup-email">Email <span class="hint">for signing in and resetting your PIN</span></label>
+        <input id="signup-email" type="email" autocomplete="email" required>
+        <label for="signup-pin">PIN <span class="hint">4–8 digits</span></label>
+        <input id="signup-pin" inputmode="numeric" pattern="\d{4,8}" type="password" autocomplete="new-password" required>
+        <p id="signup-error" class="error" role="alert" hidden></p>
+        <button class="btn primary" type="submit">Create account</button>
+      </form>
+
+      <!-- Forgot PIN -->
+      <form id="forgot-form" class="auth-form" hidden>
+        <h2 class="form-title">Reset your PIN</h2>
+        <p class="muted small">We'll email you a 6-digit code.</p>
+        <label for="forgot-email">Email</label>
+        <input id="forgot-email" type="email" autocomplete="email" required>
+        <p id="forgot-error" class="error" role="alert" hidden></p>
+        <button class="btn primary" type="submit">Email me a code</button>
+        <button class="link-btn center back-to-signin" type="button">Back to sign in</button>
+      </form>
+
+      <form id="reset-form" class="auth-form" hidden>
+        <h2 class="form-title">Enter your code</h2>
+        <p id="reset-sent" class="muted small"></p>
+        <label for="reset-code">6-digit code</label>
+        <input id="reset-code" inputmode="numeric" maxlength="6" autocomplete="one-time-code" class="code-input" required>
+        <label for="reset-pin">New PIN <span class="hint">4–8 digits</span></label>
+        <input id="reset-pin" inputmode="numeric" pattern="\d{4,8}" type="password" autocomplete="new-password" required>
+        <p id="reset-error" class="error" role="alert" hidden></p>
+        <button class="btn primary" type="submit">Set new PIN</button>
+        <button id="resend-code" class="link-btn center" type="button">Send a new code</button>
+        <button class="link-btn center back-to-signin" type="button">Back to sign in</button>
+      </form>
+    </div>
+  </main>
+
+  <!-- Add email (accounts made before email sign-in) -->
+  <main id="add-email" class="join" hidden>
+    <form id="add-email-form" class="join-card" autocomplete="off">
+      <p class="eyebrow">One quick thing</p>
+      <h1 class="brand">Add your email</h1>
+      <p class="join-copy">You'll sign in with your email from now on, and it lets you reset your PIN if you forget it.</p>
+      <label for="add-email-input">Email</label>
+      <input id="add-email-input" type="email" autocomplete="email" required>
+      <p id="add-email-error" class="error" role="alert" hidden></p>
+      <button class="btn primary" type="submit">Save email</button>
     </form>
   </main>
 
@@ -54,9 +114,9 @@
 
         <form id="join-form" class="group-form" autocomplete="off">
           <h2 class="form-title">Join a group</h2>
-          <p class="muted small">Ask the group leader for the 6-character invite code.</p>
+          <p class="muted small">Ask the group leader for the invite code.</p>
           <label for="join-code">Invite code</label>
-          <input id="join-code" maxlength="6" class="code-input" placeholder="K7MX2Q" required>
+          <input id="join-code" maxlength="12" class="code-input" placeholder="K7MX2Q" required>
           <p id="join-error" class="error" role="alert" hidden></p>
           <button class="btn ghost" type="submit">Join group</button>
         </form>
@@ -121,13 +181,28 @@
             <span class="muted small">Invite code</span>
             <span id="invite-code" class="invite-code"></span>
             <button id="copy-code" class="btn ghost sm" type="button">Copy</button>
-            <button id="new-code" class="btn ghost sm" type="button" hidden>New code</button>
+            <button id="edit-code" class="btn ghost sm" type="button" hidden>Change code</button>
           </div>
+          <form id="code-form" class="code-form" hidden>
+            <label for="code-input" class="muted small">New invite code <span class="hint">4–12 letters or numbers</span></label>
+            <div class="code-form-row">
+              <input id="code-input" class="code-input" maxlength="12" autocomplete="off">
+              <button class="btn primary sm" type="submit">Save</button>
+              <button id="random-code" class="btn ghost sm" type="button">Random</button>
+              <button id="cancel-code" class="btn ghost sm" type="button">Cancel</button>
+            </div>
+            <p class="muted small">The old code stops working as soon as you save.</p>
+            <p id="code-error" class="error" role="alert" hidden></p>
+          </form>
           <div class="book-row">
             <label for="book-select" class="muted small">Sportsbook</label>
             <select id="book-select"></select>
           </div>
           <ul id="members" class="members"></ul>
+          <div id="removed-wrap" hidden>
+            <p class="eyebrow removed-title">Removed</p>
+            <ul id="removed" class="members"></ul>
+          </div>
           <div class="leave-row">
             <button id="leave" class="btn danger-ghost sm" type="button">Leave group</button>
             <span id="leave-confirm" hidden>

@@ -113,6 +113,24 @@ input, select {
 #leave-confirm { display: inline-flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .gone-note { color: var(--down); }
 
+/* Auth */
+.mode-tabs { display: flex; gap: 4px; background: var(--surface-2); border-radius: 10px; padding: 4px; margin-bottom: 4px; }
+.mode-tab { flex: 1; min-height: 38px; border: 0; border-radius: 8px; background: none; font-weight: 600; color: var(--muted); cursor: pointer; }
+.mode-tab[aria-selected="true"] { background: var(--surface); color: var(--ink); box-shadow: var(--shadow); }
+.auth-form { display: flex; flex-direction: column; gap: 8px; }
+.auth-form label { font-weight: 600; font-size: 14px; margin-top: 4px; }
+.auth-form > .hint { font-size: 13px; margin-top: -4px; }
+.auth-form .btn { margin-top: 8px; }
+.link-btn.center { align-self: center; }
+
+/* Leader controls */
+.code-form { display: flex; flex-direction: column; gap: 6px; padding-bottom: 12px; }
+.code-form-row { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.code-form-row .code-input { flex: 1 1 140px; width: auto; min-height: 38px; }
+.member-actions { display: inline-flex; align-items: center; flex-wrap: wrap; gap: 6px 10px; justify-content: flex-end; }
+.danger-link { color: var(--down); }
+.removed-title { margin-top: 14px; }
+
 /* App shell */
 .app { max-width: 1120px; margin: 0 auto; padding-block: 12px 32px; }
 .topbar { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; padding-block: 6px 12px; }

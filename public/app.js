@@ -88,25 +88,106 @@ function showError(id, msg) {
 }
 
 function showScreen(name) {
-  $('#login').hidden = name !== 'login';
-  $('#groups').hidden = name !== 'groups';
-  $('#app').hidden = name !== 'app';
+  for (const s of ['login', 'add-email', 'groups', 'app']) $(`#${s}`).hidden = s !== name;
 }
 
-// ---------------------------------------------------------------- sign in
+// ---------------------------------------------------------------- sign in / sign up / reset
 
-$('#login-form').addEventListener('submit', async (e) => {
+const AUTH_FORMS = ['signin', 'signup', 'forgot', 'reset'];
+function showAuth(which) {
+  for (const f of AUTH_FORMS) {
+    $(`#${f}-form`).hidden = f !== which;
+    showError(`#${f}-error`);
+  }
+  $('.mode-tabs').hidden = which === 'forgot' || which === 'reset';
+  $('#mode-signin').setAttribute('aria-selected', String(which === 'signin'));
+  $('#mode-signup').setAttribute('aria-selected', String(which === 'signup'));
+  showScreen('login');
+}
+
+function signedIn(token) {
+  state.token = token;
+  store('pr_token', token);
+  boot();
+}
+
+$('#mode-signin').addEventListener('click', () => showAuth('signin'));
+$('#mode-signup').addEventListener('click', () => showAuth('signup'));
+$('#show-forgot').addEventListener('click', () => {
+  const typed = $('#signin-login').value.trim();
+  if (typed.includes('@')) $('#forgot-email').value = typed;
+  showAuth('forgot');
+});
+document.querySelectorAll('.back-to-signin').forEach((b) => b.addEventListener('click', () => showAuth('signin')));
+
+$('#signin-form').addEventListener('submit', async (e) => {
   e.preventDefault();
-  showError('#login-error');
+  showError('#signin-error');
   try {
     const { token } = await api('/api/login', {
-      method: 'POST',
-      body: { name: $('#login-name').value, pin: $('#login-pin').value },
+      method: 'POST', body: { login: $('#signin-login').value, pin: $('#signin-pin').value },
     });
-    state.token = token;
-    store('pr_token', token);
+    $('#signin-pin').value = '';
+    signedIn(token);
+  } catch (ex) { showError('#signin-error', ex.message); }
+});
+
+$('#signup-form').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  showError('#signup-error');
+  try {
+    const { token } = await api('/api/signup', {
+      method: 'POST',
+      body: { name: $('#signup-name').value, email: $('#signup-email').value, pin: $('#signup-pin').value },
+    });
+    $('#signup-pin').value = '';
+    signedIn(token);
+  } catch (ex) { showError('#signup-error', ex.message); }
+});
+
+async function requestCode() {
+  const { message } = await api('/api/forgot', { method: 'POST', body: { email: $('#forgot-email').value } });
+  $('#reset-sent').textContent = `${message} Check your spam folder if it's not in your inbox.`;
+}
+
+$('#forgot-form').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  showError('#forgot-error');
+  try {
+    await requestCode();
+    showAuth('reset');
+    $('#reset-code').focus();
+  } catch (ex) { showError('#forgot-error', ex.message); }
+});
+
+$('#resend-code').addEventListener('click', async () => {
+  showError('#reset-error');
+  try { await requestCode(); toast('New code sent'); } catch (ex) { showError('#reset-error', ex.message); }
+});
+
+$('#reset-form').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  showError('#reset-error');
+  try {
+    const { token } = await api('/api/reset', {
+      method: 'POST',
+      body: { email: $('#forgot-email').value, code: $('#reset-code').value, pin: $('#reset-pin').value },
+    });
+    $('#reset-code').value = '';
+    $('#reset-pin').value = '';
+    toast('PIN updated. Other devices were signed out.');
+    signedIn(token);
+  } catch (ex) { showError('#reset-error', ex.message); }
+});
+
+$('#add-email-form').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  showError('#add-email-error');
+  try {
+    await api('/api/me/email', { method: 'POST', body: { email: $('#add-email-input').value } });
+    toast('Email saved. Use it to sign in from now on.');
     boot();
-  } catch (ex) { showError('#login-error', ex.message); }
+  } catch (ex) { showError('#add-email-error', ex.message); }
 });
 
 $('#groups-logout').addEventListener('click', async () => {
@@ -119,7 +200,7 @@ function signOutLocal() {
   store('pr_token', null);
   store('pr_group', null);
   clearInterval(poll);
-  showScreen('login');
+  showAuth('signin');
 }
 
 // ---------------------------------------------------------------- groups
@@ -185,6 +266,8 @@ function openGroup(id, showInvite = false) {
   state.group = g;
   state.legs = [];
   state.seenLegIds = new Set();
+  state.confirmKick = null;
+  $('#code-form').hidden = true;
   store('pr_group', id);
   $('#group-info').open = showInvite;
   renderGroupHeader();
@@ -204,20 +287,56 @@ function renderGroupHeader() {
   $('#group-name').textContent = g.name;
   $('#me-name').textContent = amLeader() ? `${state.me.name} (leader)` : state.me.name;
   $('#invite-code').textContent = g.code;
-  $('#new-code').hidden = !amLeader();
+  $('#edit-code').hidden = !amLeader() || !$('#code-form').hidden;
+  if (!amLeader()) $('#code-form').hidden = true;
   const bookSel = $('#book-select');
   bookSel.replaceChildren(...state.sportsbooks.map((b) => el('option', { value: b.key }, b.title)));
   bookSel.value = g.sportsbook.key;
   bookSel.disabled = !amLeader();
   bookSel.title = amLeader() ? '' : 'Only the group leader can change this';
   $('#member-count').textContent = `${g.members.length} member${g.members.length === 1 ? '' : 's'}`;
-  $('#members').replaceChildren(...g.members.map((m) => el('li', { class: 'member' },
-    el('span', {}, m.name, m.id === state.me.id ? el('span', { class: 'muted' }, ' (you)') : null),
-    m.isLeader
-      ? el('span', { class: 'pill leader' }, 'Leader')
-      : amLeader()
-        ? el('button', { class: 'link-btn', type: 'button', onclick: () => makeLeader(m) }, 'Make leader')
-        : null)));
+
+  $('#members').replaceChildren(...g.members.map((m) => {
+    let right = null;
+    if (m.isLeader) right = el('span', { class: 'pill leader' }, 'Leader');
+    else if (amLeader() && state.confirmKick === m.id) {
+      right = el('span', { class: 'member-actions' },
+        el('span', { class: 'small' }, `Remove ${m.name}?`),
+        el('button', { class: 'btn danger sm', type: 'button', onclick: () => kick(m) }, 'Remove'),
+        el('button', { class: 'btn ghost sm', type: 'button', onclick: () => { state.confirmKick = null; renderGroupHeader(); } }, 'Cancel'));
+    } else if (amLeader()) {
+      right = el('span', { class: 'member-actions' },
+        el('button', { class: 'link-btn', type: 'button', onclick: () => makeLeader(m) }, 'Make leader'),
+        el('button', { class: 'link-btn danger-link', type: 'button', onclick: () => { state.confirmKick = m.id; renderGroupHeader(); } }, 'Remove'));
+    }
+    return el('li', { class: 'member' },
+      el('span', {}, m.name, m.id === state.me.id ? el('span', { class: 'muted' }, ' (you)') : null), right);
+  }));
+
+  const removed = amLeader() ? g.removed : [];
+  $('#removed-wrap').hidden = !removed.length;
+  $('#removed').replaceChildren(...removed.map((m) => el('li', { class: 'member' },
+    el('span', { class: 'muted' }, m.name),
+    el('button', { class: 'link-btn', type: 'button', onclick: () => unban(m) }, 'Let back in'))));
+}
+
+async function kick(m) {
+  state.confirmKick = null;
+  try {
+    const { group } = await groupApi('/kick', { method: 'POST', body: { memberId: m.id } });
+    state.group = group;
+    renderGroupHeader();
+    toast(`${m.name} was removed. They can't rejoin unless you let them back in.`);
+  } catch (ex) { toast(ex.message); renderGroupHeader(); }
+}
+
+async function unban(m) {
+  try {
+    const { group } = await groupApi('/unban', { method: 'POST', body: { memberId: m.id } });
+    state.group = group;
+    renderGroupHeader();
+    toast(`${m.name} can rejoin with the invite code`);
+  } catch (ex) { toast(ex.message); }
 }
 
 $('#book-select').addEventListener('change', async (e) => {
@@ -235,13 +354,35 @@ $('#copy-code').addEventListener('click', async () => {
   catch { toast(`Invite code: ${code}`); }
 });
 
-$('#new-code').addEventListener('click', async () => {
+function closeCodeForm() {
+  $('#code-form').hidden = true;
+  showError('#code-error');
+  renderGroupHeader();
+}
+
+async function saveCode(code) {
+  showError('#code-error');
   try {
-    const { group } = await groupApi('/code', { method: 'POST' });
+    const { group } = await groupApi('/code', { method: 'POST', body: { code } });
     state.group = group;
-    renderGroupHeader();
-    toast('New invite code made. The old one no longer works.');
-  } catch (ex) { toast(ex.message); }
+    closeCodeForm();
+    toast(`Invite code is now ${group.code}. The old one no longer works.`);
+  } catch (ex) { showError('#code-error', ex.message); }
+}
+
+$('#edit-code').addEventListener('click', () => {
+  $('#code-form').hidden = false;
+  $('#edit-code').hidden = true;
+  $('#code-input').value = state.group.code;
+  $('#code-input').select();
+});
+$('#cancel-code').addEventListener('click', closeCodeForm);
+$('#random-code').addEventListener('click', () => saveCode(''));
+$('#code-form').addEventListener('submit', (e) => {
+  e.preventDefault();
+  const v = $('#code-input').value.trim();
+  if (!v) return showError('#code-error', 'Type a code, or tap Random.');
+  saveCode(v);
 });
 
 async function makeLeader(m) {
@@ -305,7 +446,7 @@ async function loadLegs(fresh) {
 function renderSlip(data) {
   const legs = state.legs;
   const live = legs.filter((l) => !l.unavailable);
-  const byId = Object.fromEntries(state.group.members.map((m) => [m.id, m]));
+  const byId = Object.fromEntries([...state.group.removed, ...state.group.members].map((m) => [m.id, m]));
   $('#demo-badge').hidden = !data.demo;
   $('#tab-count').textContent = legs.length;
 
@@ -520,9 +661,10 @@ async function boot() {
   try {
     await loadMe();
   } catch (ex) {
-    if (state.token) { showScreen('login'); showError('#login-error', ex.message); }
+    if (state.token) { showAuth('signin'); showError('#signin-error', ex.message); }
     return;
   }
+  if (!state.me.email) return showScreen('add-email');
   if (state.groupId && state.groups.some((g) => g.id === state.groupId)) openGroup(state.groupId);
   else if (state.groups.length === 1) openGroup(state.groups[0].id);
   else showGroups();
@@ -530,4 +672,4 @@ async function boot() {
 
 document.addEventListener('visibilitychange', () => { if (!document.hidden && state.groupId && !$('#app').hidden) loadLegs(false); });
 
-if (state.token) boot(); else showScreen('login');
+if (state.token) boot(); else showAuth('signin');
