@@ -223,42 +223,78 @@ function fixLink(link) {
   return link;
 }
 
-function describeOutcome(market, o) {
+// Milestone lines ("1+ HR", "250+ yds") are an Over x.5 in the alternate market.
+const milestone = (o) => o.name === 'Over' && o.point != null && o.point % 1 !== 0;
+
+function describeOutcome(market, o, isAlt) {
+  if (isAlt && o.description && milestone(o)) return `${o.description} ${Math.ceil(o.point)}+`;
   const pt = o.point == null ? '' : ` ${market === 'spreads' && o.point > 0 ? '+' : ''}${o.point}`;
   if (o.description) return `${o.description} ${o.name}${pt}`; // player props: description = player
   if (market === 'h2h') return `${o.name} ML`;
   return `${o.name}${pt}`;
 }
 
+// The Odds API files many FanDuel props (e.g. "To Hit a Home Run", "2+ HRs", "250+ Pass Yds")
+// under "<market>_alternate", so ask for both in one call. Only markets that come back cost credits.
+const ALT_MARKETS = new Set([
+  'player_pass_yds', 'player_pass_tds', 'player_rush_yds', 'player_reception_yds', 'player_receptions',
+  'player_points', 'player_rebounds', 'player_assists', 'player_threes', 'player_points_rebounds_assists',
+  'batter_hits', 'batter_total_bases', 'batter_home_runs', 'batter_rbis', 'batter_hits_runs_rbis',
+  'pitcher_strikeouts', 'player_shots_on_goal',
+]);
+const altKey = (market) => (ALT_MARKETS.has(market) ? `${market}_alternate` : null);
+
 async function getProps(sport, eventId, market) {
+  const alt = altKey(market);
   const raw = DEMO
     ? demoOdds(sport, eventId, market)
     : await oddsApi(`/sports/${sport}/events/${eventId}/odds`, {
       regions: 'us',
-      markets: market,
+      markets: alt ? `${market},${alt}` : market,
       bookmakers: 'fanduel',
       oddsFormat: 'american',
       includeLinks: 'true',
       includeSids: 'true',
     });
   const bk = (raw.bookmakers || []).find((b) => b.key === 'fanduel');
-  const m = bk?.markets?.find((x) => x.key === market);
+  const main = bk?.markets?.find((x) => x.key === market);
+  const altM = alt && bk?.markets?.find((x) => x.key === alt);
   const event = {
     id: raw.id, home: raw.home_team, away: raw.away_team, commence: raw.commence_time,
     name: `${raw.away_team} @ ${raw.home_team}`,
   };
-  const outcomes = (m?.outcomes || []).map((o) => ({
-    key: `${o.description || ''}|${o.name}|${o.point ?? ''}`,
-    label: describeOutcome(market, o),
+
+  const toOutcome = (m, o, isAlt) => ({
+    key: `${isAlt ? 'alt:' : ''}${o.description || ''}|${o.name}|${o.point ?? ''}`,
+    label: describeOutcome(market, o, isAlt),
     player: o.description || null,
-    side: o.name,
-    point: o.point ?? null,
+    side: isAlt && o.description && milestone(o) ? `${Math.ceil(o.point)}+` : o.name,
+    point: isAlt && o.description && milestone(o) ? null : o.point ?? null,
     price: o.price,
+    alt: isAlt,
     link: fixLink(o.link) || fixLink(m.link) || null,
     sid: o.sid || null,
     marketSid: m.sid || null,
-  }));
-  return { event, market, marketLabel: marketLabel(sport, market), lastUpdate: m?.last_update || null, outcomes };
+  });
+
+  const seen = new Set();
+  const outcomes = [];
+  for (const [m, isAlt] of [[main, false], [altM, true]]) {
+    for (const o of m?.outcomes || []) {
+      const same = `${o.description || ''}|${o.name}|${o.point ?? ''}`;
+      if (seen.has(same)) continue; // alternate repeats the main line
+      seen.add(same);
+      outcomes.push({ ...toOutcome(m, o, isAlt), _pt: o.point ?? 0 });
+    }
+  }
+  // Keep each player's lines together: main line first, then milestones low to high.
+  const order = new Map();
+  outcomes.forEach((o) => { if (!order.has(o.player)) order.set(o.player, order.size); });
+  outcomes.sort((a, b) => order.get(a.player) - order.get(b.player) || a.alt - b.alt || a._pt - b._pt);
+  outcomes.forEach((o) => delete o._pt);
+
+  const lastUpdate = [main?.last_update, altM?.last_update].filter(Boolean).sort().pop() || null;
+  return { event, market, marketLabel: marketLabel(sport, market), lastUpdate, outcomes };
 }
 
 // One FanDuel URL that loads every leg into the betslip.
@@ -756,7 +792,20 @@ function demoOdds(sport, eventId, market) {
     case 'player_points_rebounds_assists': outcomes = [...P.G, ...P.F].flatMap((p) => ou(p, line(p, 28, 12, 1))); break;
     case 'batter_hits': outcomes = P.B.flatMap((p) => ou(p, 0.5)); break;
     case 'batter_total_bases': outcomes = P.B.flatMap((p) => ou(p, 1.5)); break;
-    case 'batter_home_runs': outcomes = P.B.map((p) => ({ name: 'Over', description: p, point: 0.5, price: 250 + Math.round(seeded(p) * 250 / 10) * 10 })); break;
+    case 'batter_home_runs': {
+      // Like real FanDuel data: home runs only arrive as milestone lines in the alternate market.
+      const hr = P.B.flatMap((p) => {
+        const one = 250 + Math.round(seeded(p) * 250 / 10) * 10;
+        return [
+          { name: 'Over', description: p, point: 0.5, price: one },
+          { name: 'Over', description: p, point: 1.5, price: one * 4 + 500 },
+        ];
+      });
+      return {
+        id: g.id, home_team: g.home, away_team: g.away, commence_time: ev.commence,
+        bookmakers: [{ key: 'fanduel', markets: [{ key: 'batter_home_runs_alternate', last_update: new Date().toISOString(), outcomes: hr }] }],
+      };
+    }
     case 'batter_rbis': outcomes = P.B.flatMap((p) => ou(p, 0.5)); break;
     case 'batter_hits_runs_rbis': outcomes = P.B.flatMap((p) => ou(p, 1.5)); break;
     case 'pitcher_strikeouts': outcomes = P.P.flatMap((p) => ou(p, line(p, 6, 3, 1))); break;
