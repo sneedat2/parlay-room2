@@ -122,6 +122,23 @@ input, select {
 .auth-form > .hint { font-size: 13px; margin-top: -4px; }
 .auth-form .btn { margin-top: 8px; }
 .link-btn.center { align-self: center; }
+.visually-hidden { position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; border: 0; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+.storage-warning { margin: 0 0 12px; padding: 10px 14px; border-radius: 10px; background: var(--stub); color: #2a2103; font-weight: 600; font-size: 14px; }
+.pw-wrap { position: relative; }
+.pw-wrap input { padding-right: 64px; }
+.pw-toggle {
+  position: absolute; right: 6px; top: 50%; transform: translateY(-50%);
+  min-height: 32px; padding: 0 10px; border: 0; border-radius: 8px; background: none;
+  color: var(--muted); font-size: 13px; font-weight: 600; cursor: pointer;
+}
+.join-card .pw-wrap .pw-toggle { margin-top: 0; }
+.invite-banner { border: 1px solid var(--stub); border-radius: 12px; padding: 12px 14px; background: var(--surface-2); }
+.invite-banner-text { margin: 4px 0 0; font-weight: 600; }
+
+/* Invite link */
+.invite-link { display: flex; flex-direction: column; gap: 6px; padding: 4px 0 14px; border-bottom: 1px solid var(--line); margin-bottom: 10px; }
+.invite-link-text { font-size: 14px; word-break: break-all; color: var(--ink); background: var(--surface-2); border-radius: 8px; padding: 8px 10px; user-select: all; }
+.invite-link-actions { display: flex; flex-wrap: wrap; gap: 6px; }
 
 /* Leader controls */
 .code-form { display: flex; flex-direction: column; gap: 6px; padding-bottom: 12px; }

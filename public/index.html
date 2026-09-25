@@ -17,38 +17,50 @@
       <h1 class="brand">Parlay Room</h1>
       <p class="join-copy">Pick FanDuel props together, then load the whole slip into FanDuel with one tap.</p>
 
+      <div id="invite-banner" class="invite-banner" hidden>
+        <p class="eyebrow">You're invited</p>
+        <p id="invite-banner-text" class="invite-banner-text"></p>
+      </div>
+
       <div class="mode-tabs" role="tablist" aria-label="Sign in or create account">
         <button id="mode-signin" class="mode-tab" type="button" role="tab" aria-selected="true">Sign in</button>
         <button id="mode-signup" class="mode-tab" type="button" role="tab" aria-selected="false">Create account</button>
       </div>
 
       <!-- Sign in -->
-      <form id="signin-form" class="auth-form">
+      <form id="signin-form" class="auth-form" method="post" action="/login">
         <label for="signin-login">Email</label>
-        <input id="signin-login" type="text" inputmode="email" autocomplete="username" required>
+        <input id="signin-login" name="username" type="text" inputmode="email" autocomplete="username" autocapitalize="none" spellcheck="false" required>
         <span class="hint">Made your account before emails? Enter your name instead.</span>
-        <label for="signin-pin">PIN</label>
-        <input id="signin-pin" inputmode="numeric" pattern="\d{4,8}" type="password" autocomplete="current-password" required>
+        <label for="signin-password">Password</label>
+        <div class="pw-wrap">
+          <input id="signin-password" name="password" type="password" autocomplete="current-password" required>
+          <button class="pw-toggle" type="button" aria-label="Show password">Show</button>
+        </div>
+        <span class="hint">Still on an old PIN? Enter it here, and you'll pick a password next.</span>
         <p id="signin-error" class="error" role="alert" hidden></p>
         <button class="btn primary" type="submit">Sign in</button>
-        <button id="show-forgot" class="link-btn center" type="button">Forgot PIN?</button>
+        <button id="show-forgot" class="link-btn center" type="button">Forgot password?</button>
       </form>
 
       <!-- Create account -->
-      <form id="signup-form" class="auth-form" hidden>
+      <form id="signup-form" class="auth-form" method="post" action="/signup" hidden>
         <label for="signup-name">Your name <span class="hint">what your group sees</span></label>
-        <input id="signup-name" maxlength="24" autocomplete="nickname" required>
-        <label for="signup-email">Email <span class="hint">for signing in and resetting your PIN</span></label>
-        <input id="signup-email" type="email" autocomplete="email" required>
-        <label for="signup-pin">PIN <span class="hint">4–8 digits</span></label>
-        <input id="signup-pin" inputmode="numeric" pattern="\d{4,8}" type="password" autocomplete="new-password" required>
+        <input id="signup-name" name="name" maxlength="24" autocomplete="nickname" required>
+        <label for="signup-email">Email <span class="hint">for signing in and resetting your password</span></label>
+        <input id="signup-email" name="username" type="email" autocomplete="username" autocapitalize="none" spellcheck="false" required>
+        <label for="signup-password">Password <span class="hint">at least 8 characters</span></label>
+        <div class="pw-wrap">
+          <input id="signup-password" name="new-password" type="password" autocomplete="new-password" minlength="8" required>
+          <button class="pw-toggle" type="button" aria-label="Show password">Show</button>
+        </div>
         <p id="signup-error" class="error" role="alert" hidden></p>
         <button class="btn primary" type="submit">Create account</button>
       </form>
 
-      <!-- Forgot PIN -->
+      <!-- Forgot password -->
       <form id="forgot-form" class="auth-form" hidden>
-        <h2 class="form-title">Reset your PIN</h2>
+        <h2 class="form-title">Reset your password</h2>
         <p class="muted small">We'll email you a 6-digit code.</p>
         <label for="forgot-email">Email</label>
         <input id="forgot-email" type="email" autocomplete="email" required>
@@ -57,15 +69,20 @@
         <button class="link-btn center back-to-signin" type="button">Back to sign in</button>
       </form>
 
-      <form id="reset-form" class="auth-form" hidden>
+      <form id="reset-form" class="auth-form" method="post" action="/reset" hidden>
         <h2 class="form-title">Enter your code</h2>
+        <!-- Tells password managers which account the new password belongs to. -->
+        <input id="reset-username" name="username" type="email" autocomplete="username" class="visually-hidden" tabindex="-1" aria-hidden="true" readonly>
         <p id="reset-sent" class="muted small"></p>
         <label for="reset-code">6-digit code</label>
         <input id="reset-code" inputmode="numeric" maxlength="6" autocomplete="one-time-code" class="code-input" required>
-        <label for="reset-pin">New PIN <span class="hint">4–8 digits</span></label>
-        <input id="reset-pin" inputmode="numeric" pattern="\d{4,8}" type="password" autocomplete="new-password" required>
+        <label for="reset-password">New password <span class="hint">at least 8 characters</span></label>
+        <div class="pw-wrap">
+          <input id="reset-password" name="new-password" type="password" autocomplete="new-password" minlength="8" required>
+          <button class="pw-toggle" type="button" aria-label="Show password">Show</button>
+        </div>
         <p id="reset-error" class="error" role="alert" hidden></p>
-        <button class="btn primary" type="submit">Set new PIN</button>
+        <button class="btn primary" type="submit">Set new password</button>
         <button id="resend-code" class="link-btn center" type="button">Send a new code</button>
         <button class="link-btn center back-to-signin" type="button">Back to sign in</button>
       </form>
@@ -77,11 +94,28 @@
     <form id="add-email-form" class="join-card" autocomplete="off">
       <p class="eyebrow">One quick thing</p>
       <h1 class="brand">Add your email</h1>
-      <p class="join-copy">You'll sign in with your email from now on, and it lets you reset your PIN if you forget it.</p>
+      <p class="join-copy">You'll sign in with your email from now on, and it lets you reset your password if you forget it.</p>
       <label for="add-email-input">Email</label>
       <input id="add-email-input" type="email" autocomplete="email" required>
       <p id="add-email-error" class="error" role="alert" hidden></p>
       <button class="btn primary" type="submit">Save email</button>
+    </form>
+  </main>
+
+  <!-- Set a password (accounts still on an old PIN) -->
+  <main id="set-password" class="join" hidden>
+    <form id="set-password-form" class="join-card" method="post" action="/password">
+      <input id="set-password-username" name="username" type="email" autocomplete="username" class="visually-hidden" tabindex="-1" aria-hidden="true" readonly>
+      <p class="eyebrow">One quick thing</p>
+      <h1 class="brand">Pick a password</h1>
+      <p class="join-copy">Parlay Room uses passwords now instead of PINs. Choose one with at least 8 characters.</p>
+      <label for="set-password-input">New password</label>
+      <div class="pw-wrap">
+        <input id="set-password-input" name="new-password" type="password" autocomplete="new-password" minlength="8" required>
+        <button class="pw-toggle" type="button" aria-label="Show password">Show</button>
+      </div>
+      <p id="set-password-error" class="error" role="alert" hidden></p>
+      <button class="btn primary" type="submit">Save password</button>
     </form>
   </main>
 
@@ -95,6 +129,8 @@
         </div>
         <button id="groups-logout" class="link-btn" type="button">Sign out</button>
       </div>
+
+      <p class="storage-warning" hidden>Heads up: this server isn't saving data permanently. Accounts, passwords and groups get erased every time the app updates. In Railway, attach a volume to the service to fix it.</p>
 
       <ul id="group-list" class="group-list"></ul>
 
@@ -139,6 +175,8 @@
       </div>
     </header>
 
+    <p class="storage-warning" hidden>Heads up: this server isn't saving data permanently. Accounts, passwords and groups get erased every time the app updates. In Railway, attach a volume to the service to fix it.</p>
+
     <nav class="tabs" aria-label="Sections">
       <button class="tab" data-tab="slip" aria-selected="true" type="button">Slip <span id="tab-count" class="count">0</span></button>
       <button class="tab" data-tab="find" aria-selected="false" type="button">Find props</button>
@@ -177,6 +215,14 @@
 
         <details id="group-info" class="group-info">
           <summary><span>Invite &amp; members</span> <span id="member-count" class="muted small"></span></summary>
+          <div class="invite-link">
+            <span class="muted small">Invite link</span>
+            <span id="invite-link" class="invite-link-text"></span>
+            <div class="invite-link-actions">
+              <button id="share-link" class="btn primary sm" type="button">Share invite link</button>
+              <button id="copy-link" class="btn ghost sm" type="button">Copy link</button>
+            </div>
+          </div>
           <div class="invite">
             <span class="muted small">Invite code</span>
             <span id="invite-code" class="invite-code"></span>
@@ -191,7 +237,7 @@
               <button id="random-code" class="btn ghost sm" type="button">Random</button>
               <button id="cancel-code" class="btn ghost sm" type="button">Cancel</button>
             </div>
-            <p class="muted small">The old code stops working as soon as you save.</p>
+            <p class="muted small">The old code and old invite links stop working as soon as you save.</p>
             <p id="code-error" class="error" role="alert" hidden></p>
           </form>
           <div class="book-row">

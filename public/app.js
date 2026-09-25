@@ -88,7 +88,54 @@ function showError(id, msg) {
 }
 
 function showScreen(name) {
-  for (const s of ['login', 'add-email', 'groups', 'app']) $(`#${s}`).hidden = s !== name;
+  for (const s of ['login', 'add-email', 'set-password', 'groups', 'app']) $(`#${s}`).hidden = s !== name;
+}
+
+document.querySelectorAll('.pw-toggle').forEach((b) => b.addEventListener('click', () => {
+  const input = b.previousElementSibling;
+  const show = input.type === 'password';
+  input.type = show ? 'text' : 'password';
+  b.textContent = show ? 'Hide' : 'Show';
+  b.setAttribute('aria-label', show ? 'Hide password' : 'Show password');
+}));
+
+// ---------------------------------------------------------------- invite links (/join/CODE)
+
+const inviteFromPath = location.pathname.match(/^\/join\/([A-Za-z0-9]{4,12})\/?$/);
+if (inviteFromPath) {
+  store('pr_invite', inviteFromPath[1].toUpperCase());
+  history.replaceState(null, '', '/');
+}
+const inviteLink = (code) => `${location.origin}/join/${code}`;
+
+async function showInviteBanner() {
+  const code = store('pr_invite');
+  $('#invite-banner').hidden = true;
+  if (!code) return;
+  try {
+    const { name, members } = await api(`/api/invite/${code}`);
+    $('#invite-banner-text').textContent =
+      `Join ${name} (${members} member${members === 1 ? '' : 's'}). Sign in or create an account and you'll be added.`;
+  } catch (ex) {
+    $('#invite-banner-text').textContent = ex.message;
+    store('pr_invite', null);
+  }
+  $('#invite-banner').hidden = false;
+}
+
+async function acceptInvite() {
+  const code = store('pr_invite');
+  store('pr_invite', null);
+  try {
+    const { group } = await api('/api/groups/join', { method: 'POST', body: { code } });
+    await loadMe();
+    openGroup(group.id);
+    toast(`You're in ${group.name}`);
+    return true;
+  } catch (ex) {
+    toast(ex.message);
+    return false;
+  }
 }
 
 // ---------------------------------------------------------------- sign in / sign up / reset
@@ -103,12 +150,21 @@ function showAuth(which) {
   $('#mode-signin').setAttribute('aria-selected', String(which === 'signin'));
   $('#mode-signup').setAttribute('aria-selected', String(which === 'signup'));
   showScreen('login');
+  showInviteBanner();
 }
 
 function signedIn(token) {
   state.token = token;
   store('pr_token', token);
   boot();
+}
+
+// Ask the browser to save the password (Chrome/Android/Edge). Safari/iOS saves from the form fields instead.
+async function rememberPassword(id, password, name) {
+  try {
+    if (!id || !password || !window.PasswordCredential || !navigator.credentials) return;
+    await navigator.credentials.store(new PasswordCredential({ id, password, name: name || id }));
+  } catch { /* the viewer declined or the browser can't; nothing to do */ }
 }
 
 $('#mode-signin').addEventListener('click', () => showAuth('signin'));
@@ -124,10 +180,11 @@ $('#signin-form').addEventListener('submit', async (e) => {
   e.preventDefault();
   showError('#signin-error');
   try {
-    const { token } = await api('/api/login', {
-      method: 'POST', body: { login: $('#signin-login').value, pin: $('#signin-pin').value },
-    });
-    $('#signin-pin').value = '';
+    const login = $('#signin-login').value.trim();
+    const password = $('#signin-password').value;
+    const { token } = await api('/api/login', { method: 'POST', body: { login, password } });
+    await rememberPassword(login, password);
+    $('#signin-password').value = '';
     signedIn(token);
   } catch (ex) { showError('#signin-error', ex.message); }
 });
@@ -136,11 +193,12 @@ $('#signup-form').addEventListener('submit', async (e) => {
   e.preventDefault();
   showError('#signup-error');
   try {
-    const { token } = await api('/api/signup', {
-      method: 'POST',
-      body: { name: $('#signup-name').value, email: $('#signup-email').value, pin: $('#signup-pin').value },
-    });
-    $('#signup-pin').value = '';
+    const name = $('#signup-name').value;
+    const email = $('#signup-email').value.trim();
+    const password = $('#signup-password').value;
+    const { token } = await api('/api/signup', { method: 'POST', body: { name, email, password } });
+    await rememberPassword(email, password, name);
+    $('#signup-password').value = '';
     signedIn(token);
   } catch (ex) { showError('#signup-error', ex.message); }
 });
@@ -155,6 +213,7 @@ $('#forgot-form').addEventListener('submit', async (e) => {
   showError('#forgot-error');
   try {
     await requestCode();
+    $('#reset-username').value = $('#forgot-email').value.trim();
     showAuth('reset');
     $('#reset-code').focus();
   } catch (ex) { showError('#forgot-error', ex.message); }
@@ -169,15 +228,30 @@ $('#reset-form').addEventListener('submit', async (e) => {
   e.preventDefault();
   showError('#reset-error');
   try {
+    const email = $('#forgot-email').value.trim();
+    const password = $('#reset-password').value;
     const { token } = await api('/api/reset', {
-      method: 'POST',
-      body: { email: $('#forgot-email').value, code: $('#reset-code').value, pin: $('#reset-pin').value },
+      method: 'POST', body: { email, code: $('#reset-code').value, password },
     });
+    await rememberPassword(email, password);
     $('#reset-code').value = '';
-    $('#reset-pin').value = '';
-    toast('PIN updated. Other devices were signed out.');
+    $('#reset-password').value = '';
+    toast('Password updated. Other devices were signed out.');
     signedIn(token);
   } catch (ex) { showError('#reset-error', ex.message); }
+});
+
+$('#set-password-form').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  showError('#set-password-error');
+  try {
+    const password = $('#set-password-input').value;
+    await api('/api/me/password', { method: 'POST', body: { password } });
+    await rememberPassword(state.me.email || state.me.name, password, state.me.name);
+    $('#set-password-input').value = '';
+    toast('Password saved. Use it to sign in from now on.');
+    boot();
+  } catch (ex) { showError('#set-password-error', ex.message); }
 });
 
 $('#add-email-form').addEventListener('submit', async (e) => {
@@ -211,6 +285,8 @@ async function loadMe() {
   state.groups = data.groups;
   state.createNeedsCode = data.createNeedsCode;
   state.sportsbooks = data.sportsbooks;
+  document.querySelectorAll('.storage-warning').forEach((p) => { p.hidden = !data.storageWarning; });
+  $('#set-password-username').value = data.me.email || data.me.name;
   $('#demo-badge').hidden = !data.demo;
 }
 
@@ -287,6 +363,7 @@ function renderGroupHeader() {
   $('#group-name').textContent = g.name;
   $('#me-name').textContent = amLeader() ? `${state.me.name} (leader)` : state.me.name;
   $('#invite-code').textContent = g.code;
+  $('#invite-link').textContent = inviteLink(g.code);
   $('#edit-code').hidden = !amLeader() || !$('#code-form').hidden;
   if (!amLeader()) $('#code-form').hidden = true;
   const bookSel = $('#book-select');
@@ -346,6 +423,26 @@ $('#book-select').addEventListener('change', async (e) => {
     loadLegs(false);
     toast(`Bets now go to ${group.sportsbook.title}`);
   } catch (ex) { toast(ex.message); renderGroupHeader(); }
+});
+
+async function copyText(text, done) {
+  try { await navigator.clipboard.writeText(text); toast(done); }
+  catch { toast(text); }
+}
+
+$('#copy-link').addEventListener('click', () => copyText(inviteLink(state.group.code), 'Invite link copied'));
+
+$('#share-link').addEventListener('click', async () => {
+  const url = inviteLink(state.group.code);
+  if (navigator.share) {
+    try {
+      await navigator.share({ title: `Join ${state.group.name} on Parlay Room`, text: `Join ${state.group.name} on Parlay Room`, url });
+      return;
+    } catch (ex) {
+      if (ex && ex.name === 'AbortError') return; // closed the share sheet
+    }
+  }
+  copyText(url, 'Invite link copied. Paste it in a text to your friends.');
 });
 
 $('#copy-code').addEventListener('click', async () => {
@@ -664,7 +761,9 @@ async function boot() {
     if (state.token) { showAuth('signin'); showError('#signin-error', ex.message); }
     return;
   }
+  if (state.me.needsPassword) return showScreen('set-password');
   if (!state.me.email) return showScreen('add-email');
+  if (store('pr_invite') && await acceptInvite()) return;
   if (state.groupId && state.groups.some((g) => g.id === state.groupId)) openGroup(state.groupId);
   else if (state.groups.length === 1) openGroup(state.groups[0].id);
   else showGroups();
@@ -672,4 +771,4 @@ async function boot() {
 
 document.addEventListener('visibilitychange', () => { if (!document.hidden && state.groupId && !$('#app').hidden) loadLegs(false); });
 
-if (state.token) boot(); else showAuth('signin');
+if (state.token) boot(); else showAuth(store('pr_invite') ? 'signup' : 'signin');

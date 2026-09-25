@@ -14,11 +14,19 @@ const API_KEY = process.env.ODDS_API_KEY || '';
 const CREATE_CODE = process.env.GROUP_CREATE_CODE || '';
 const FANDUEL_STATE = (process.env.FANDUEL_STATE || '').toLowerCase();
 const CACHE_SECONDS = Number(process.env.ODDS_CACHE_SECONDS) || 120;
-const DATA_FILE = process.env.DATA_FILE || path.join(__dirname, 'data.json');
+// Where accounts, groups and slips are saved. On Railway this must be on an attached volume,
+// or every deploy starts from an empty file. Railway tells us the volume's path, so use it.
+const VOLUME_DIR = process.env.RAILWAY_VOLUME_MOUNT_PATH || '';
+const ON_RAILWAY = !!(process.env.RAILWAY_ENVIRONMENT || process.env.RAILWAY_PROJECT_ID);
+const DATA_FILE = (VOLUME_DIR && !(process.env.DATA_FILE || '').startsWith(VOLUME_DIR))
+  ? path.join(VOLUME_DIR, 'data.json') // volume attached: always save there, even if DATA_FILE is missing or wrong
+  : process.env.DATA_FILE || path.join(__dirname, 'data.json');
+// Temporary = wiped whenever the app is updated or restarted.
+const STORAGE_TEMPORARY = ON_RAILWAY && !VOLUME_DIR;
 const PUBLIC_DIR = path.join(__dirname, 'public');
 const DEMO = !API_KEY;
 
-// Email for PIN reset codes. Sent over HTTPS APIs (Railway blocks SMTP on Hobby plans).
+// Email for password reset codes. Sent over HTTPS APIs (Railway blocks SMTP on Hobby plans).
 // Brevo works without owning a domain; Resend needs a verified domain to email anyone but you.
 const BREVO_API_KEY = process.env.BREVO_API_KEY || '';
 const RESEND_API_KEY = process.env.RESEND_API_KEY || '';
@@ -86,9 +94,31 @@ const marketLabel = (sport, m) => sportByKey(sport)?.markets.find((x) => x.key =
 
 // ---------------------------------------------------------------- storage
 
-// members = accounts (name + PIN). Each group has its own leader, members and slip.
+// members = accounts (name + email + password). Each group has its own leader, members and slip.
 let db = { members: [], sessions: {}, groups: [] };
-try { db = { ...db, ...JSON.parse(fs.readFileSync(DATA_FILE, 'utf8')) }; } catch { /* first run */ }
+fs.mkdirSync(path.dirname(DATA_FILE), { recursive: true });
+let savedText = null;
+try {
+  savedText = fs.readFileSync(DATA_FILE, 'utf8');
+} catch (err) {
+  if (err.code !== 'ENOENT') throw err; // can't read it: stop rather than start empty and overwrite it
+}
+if (savedText == null && fs.existsSync(DATA_FILE + '.tmp')) {
+  // A save was interrupted before the swap; the .tmp copy is complete (it's written in full first).
+  savedText = fs.readFileSync(DATA_FILE + '.tmp', 'utf8');
+  console.warn('Recovered data from an interrupted save.');
+}
+if (savedText != null) {
+  try {
+    db = { ...db, ...JSON.parse(savedText) };
+  } catch (err) {
+    // Never silently replace a damaged file with an empty one. Keep a copy and stop.
+    const backup = `${DATA_FILE}.damaged-${Date.now()}`;
+    fs.copyFileSync(DATA_FILE, backup);
+    console.error(`${DATA_FILE} couldn't be read (${err.message}). A copy was saved to ${backup}. Not starting, so nothing gets overwritten.`);
+    process.exit(1);
+  }
+}
 
 // Older single-group data: fold it into one group.
 function migrateSingleGroup() {
@@ -106,7 +136,14 @@ function migrateSingleGroup() {
 
 function save() {
   const tmp = DATA_FILE + '.tmp';
-  fs.writeFileSync(tmp, JSON.stringify(db, null, 2));
+  // Write the full copy, flush it to disk, then swap it in, so a crash mid-save can't leave half a file.
+  const fd = fs.openSync(tmp, 'w');
+  try {
+    fs.writeSync(fd, JSON.stringify(db, null, 2));
+    fs.fsyncSync(fd);
+  } finally {
+    fs.closeSync(fd);
+  }
   fs.renameSync(tmp, DATA_FILE);
 }
 
@@ -353,7 +390,9 @@ function currentMember(req) {
 const MIME = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript', '.css': 'text/css', '.svg': 'image/svg+xml', '.png': 'image/png' };
 
 function serveStatic(req, res, pathname) {
-  const file = path.normalize(path.join(PUBLIC_DIR, pathname === '/' ? 'index.html' : pathname));
+  // Invite links (/join/CODE) open the app, which reads the code from the address.
+  const page = pathname === '/' || /^\/join\/[A-Za-z0-9]{4,12}\/?$/.test(pathname) ? 'index.html' : pathname;
+  const file = path.normalize(path.join(PUBLIC_DIR, page));
   if (!file.startsWith(PUBLIC_DIR)) return send(res, 404, { error: 'Not found' });
   fs.readFile(file, (err, buf) => {
     if (err) return send(res, 404, { error: 'Not found' });
@@ -378,19 +417,37 @@ async function handleApi(req, res, url) {
     return send(res, status, { error });
   };
 
-  const validPin = (pin) => /^\d{4,8}$/.test(String(pin || ''));
+  // New passwords: 8+ characters. Old accounts may still hold a 4–8 digit PIN until they change it.
+  const passwordProblem = (pw) => {
+    const s = String(pw || '');
+    if (s.length < 8) return 'Password must be at least 8 characters.';
+    if (s.length > 128) return 'Password is too long (128 characters max).';
+    if (/^\d+$/.test(s) && s.length < 10) return 'Use letters too, not just numbers, or make it at least 10 digits.';
+    return null;
+  };
+
+  // Public: what an invite link points to, so the sign-in screen can say which group.
+  const inviteMatch = pathname.match(/^\/api\/invite\/([A-Za-z0-9]{4,12})$/);
+  if (inviteMatch && req.method === 'GET') {
+    if (tooManyTries()) return send(res, 429, { error: 'Too many tries. Wait 15 minutes.' });
+    const g = db.groups.find((x) => x.code === inviteMatch[1].toUpperCase());
+    if (!g) return fail(404, "This invite link doesn't work anymore. Ask the group leader for a new one.");
+    return send(res, 200, { name: g.name, members: g.memberIds.length });
+  }
 
   if (pathname === '/api/signup' && req.method === 'POST') {
     if (tooManyTries()) return send(res, 429, { error: 'Too many tries. Wait 15 minutes.' });
-    const { name, email, pin } = await readBody(req);
+    const { name, email, password } = await readBody(req);
     const cleanName = String(name || '').trim().slice(0, 24);
     const cleanEmail = normalizeEmail(email);
     if (!cleanName) return send(res, 400, { error: 'Enter your name.' });
     if (!validEmail(cleanEmail)) return send(res, 400, { error: 'Enter a valid email address.' });
-    if (!validPin(pin)) return send(res, 400, { error: 'PIN must be 4–8 digits.' });
-    if (memberByEmail(cleanEmail)) return send(res, 409, { error: 'That email already has an account. Sign in, or use Forgot PIN.' });
+    const problem = passwordProblem(password);
+    if (problem) return send(res, 400, { error: problem });
+    if (memberByEmail(cleanEmail)) return send(res, 409, { error: 'That email already has an account. Sign in, or use Forgot password.' });
     const salt = newId();
-    const member = { id: newId(), name: cleanName, email: cleanEmail, salt, pinHash: hashPin(pin, salt), joinedAt: new Date().toISOString() };
+    // pinHash holds the password hash (name kept so older saved data still loads).
+    const member = { id: newId(), name: cleanName, email: cleanEmail, salt, pinHash: hashPin(password, salt), joinedAt: new Date().toISOString() };
     db.members.push(member);
     const token = newSession(member);
     save();
@@ -399,20 +456,23 @@ async function handleApi(req, res, url) {
 
   if (pathname === '/api/login' && req.method === 'POST') {
     if (tooManyTries()) return send(res, 429, { error: 'Too many tries. Wait 15 minutes.' });
-    const { login, pin } = await readBody(req);
+    const { login, password } = await readBody(req);
     const id = String(login || '').trim();
+    const pw = String(password || '');
     if (!id) return send(res, 400, { error: 'Enter your email.' });
-    if (!validPin(pin)) return send(res, 400, { error: 'PIN must be 4–8 digits.' });
+    if (!pw || pw.length > 128) return send(res, 400, { error: 'Enter your password.' });
     // Email for everyone; accounts made before email existed can still use their name once.
     const member = id.includes('@')
       ? memberByEmail(normalizeEmail(id))
       : db.members.find((m) => !m.email && m.name.toLowerCase() === id.toLowerCase());
-    const wrong = id.includes('@') ? 'Wrong email or PIN.' : 'Wrong name or PIN.';
+    const wrong = id.includes('@') ? 'Wrong email or password.' : 'Wrong name or password.';
     if (!member) return fail(403, wrong);
-    if (accountLocked(member)) return send(res, 429, { error: 'Too many wrong PINs. Wait 15 minutes, or use Forgot PIN.' });
-    if (hashPin(pin, member.salt) !== member.pinHash) { noteBadPin(member); return fail(403, wrong); }
+    if (accountLocked(member)) return send(res, 429, { error: 'Too many wrong passwords. Wait 15 minutes, or use Forgot password.' });
+    if (hashPin(pw, member.salt) !== member.pinHash) { noteBadPin(member); return fail(403, wrong); }
     failedJoins.delete(ip);
     member.failCount = 0;
+    // Still on an old PIN? Make them pick a real password next.
+    if (passwordProblem(pw)) member.mustChangePassword = true;
     const token = newSession(member);
     save();
     return send(res, 200, { token });
@@ -434,17 +494,17 @@ async function handleApi(req, res, url) {
     member.reset = { salt, codeHash: hashPin(code, salt), expires: Date.now() + 15 * 60 * 1000, tries: 0, sentAt: Date.now() };
     save();
     if (!EMAIL_ON) {
-      console.log(`[PIN reset] Email isn't configured. Code for ${member.email}: ${code}`);
+      console.log(`[Password reset] Email isn't configured. Code for ${member.email}: ${code}`);
       return send(res, 503, { error: "Email isn't set up on this server yet, so a code can't be sent. Ask whoever runs the app." });
     }
     await sendEmail(member.email, `Your Parlay Room code: ${code}`,
-      `Hi ${member.name},\n\nYour Parlay Room PIN reset code is: ${code}\n\nIt expires in 15 minutes. If you didn't ask for this, ignore this email; your PIN hasn't changed.`);
+      `Hi ${member.name},\n\nYour Parlay Room password reset code is: ${code}\n\nIt expires in 15 minutes. If you didn't ask for this, ignore this email; your password hasn't changed.`);
     return send(res, 200, sentMsg);
   }
 
   if (pathname === '/api/reset' && req.method === 'POST') {
     if (tooManyTries()) return send(res, 429, { error: 'Too many tries. Wait 15 minutes.' });
-    const { email, code, pin } = await readBody(req);
+    const { email, code, password } = await readBody(req);
     const member = memberByEmail(normalizeEmail(email));
     const r = member && member.reset;
     if (!r || r.expires < Date.now() || r.tries >= 5) {
@@ -455,9 +515,11 @@ async function handleApi(req, res, url) {
       save();
       return fail(400, r.tries >= 5 ? 'Too many wrong codes. Ask for a new one.' : "That code isn't right. Check the email and try again.");
     }
-    if (!validPin(pin)) return send(res, 400, { error: 'New PIN must be 4–8 digits.' });
+    const problem = passwordProblem(password);
+    if (problem) return send(res, 400, { error: problem });
     member.salt = newId();
-    member.pinHash = hashPin(pin, member.salt);
+    member.pinHash = hashPin(password, member.salt);
+    delete member.mustChangePassword;
     delete member.reset;
     member.failCount = 0;
     delete member.lockedUntil;
@@ -475,9 +537,31 @@ async function handleApi(req, res, url) {
   if (pathname === '/api/me') {
     const groups = db.groups.filter((g) => g.memberIds.includes(me.id)).map(groupView);
     return send(res, 200, {
-      me: { id: me.id, name: me.name, email: me.email || null }, groups, demo: DEMO, createNeedsCode: !!CREATE_CODE,
+      me: { id: me.id, name: me.name, email: me.email || null, needsPassword: !!me.mustChangePassword },
+      groups, demo: DEMO, createNeedsCode: !!CREATE_CODE,
+      // Only leaders need to know; they're the ones who can fix hosting.
+      storageWarning: STORAGE_TEMPORARY && db.groups.some((g) => g.leaderId === me.id),
       sportsbooks: SPORTSBOOKS.map(({ key, title }) => ({ key, title })),
     });
+  }
+
+  if (pathname === '/api/me/password' && req.method === 'POST') {
+    const { current, password } = await readBody(req);
+    // Moving off an old PIN happens right after a correct sign-in, so no current password needed then.
+    if (!me.mustChangePassword && hashPin(String(current || ''), me.salt) !== me.pinHash) {
+      noteBadPin(me);
+      return send(res, 403, { error: 'Your current password is wrong.' });
+    }
+    const problem = passwordProblem(password);
+    if (problem) return send(res, 400, { error: problem });
+    me.salt = newId();
+    me.pinHash = hashPin(password, me.salt);
+    delete me.mustChangePassword;
+    // Sign out other devices, keep this one.
+    const token = (req.headers.authorization || '').replace(/^Bearer\s+/i, '');
+    for (const [t, mid] of Object.entries(db.sessions)) if (mid === me.id && t !== token) delete db.sessions[t];
+    save();
+    return send(res, 200, { ok: true });
   }
 
   if (pathname === '/api/me/email' && req.method === 'POST') {
@@ -716,6 +800,10 @@ http.createServer(async (req, res) => {
 }).listen(PORT, () => {
   console.log(`Parlay Room running at http://localhost:${PORT}`);
   if (DEMO) console.log('No ODDS_API_KEY set — using demo odds.');
+  console.log(`Saving data to ${DATA_FILE} (${db.members.length} accounts, ${db.groups.length} groups loaded).`);
+  if (STORAGE_TEMPORARY) {
+    console.warn('WARNING: No Railway volume is attached. Accounts, passwords and groups will be ERASED on every update or restart. Attach a volume to this service (any mount path, e.g. /data).');
+  }
 });
 
 // ---------------------------------------------------------------- helpers
