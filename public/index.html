@@ -1,0 +1,161 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>Parlay Room</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Barlow:wght@400;500;600&family=Barlow+Condensed:wght@600;700&display=swap">
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <!-- Sign in -->
+  <main id="login" class="join" hidden>
+    <form id="login-form" class="join-card" autocomplete="off">
+      <p class="eyebrow">Group slip</p>
+      <h1 class="brand">Parlay Room</h1>
+      <p class="join-copy">Pick FanDuel props together, then load the whole slip into FanDuel with one tap.</p>
+      <label for="login-name">Your name</label>
+      <input id="login-name" maxlength="24" required>
+      <label for="login-pin">PIN <span class="hint">4–8 digits. New here? Pick one now.</span></label>
+      <input id="login-pin" inputmode="numeric" pattern="\d{4,8}" type="password" required>
+      <p id="login-error" class="error" role="alert" hidden></p>
+      <button class="btn primary" type="submit">Sign in</button>
+    </form>
+  </main>
+
+  <!-- Groups -->
+  <main id="groups" class="join" hidden>
+    <div class="join-card wide">
+      <div class="groups-head">
+        <div>
+          <p class="eyebrow">Signed in as <span id="groups-me"></span></p>
+          <h1 class="brand">Your groups</h1>
+        </div>
+        <button id="groups-logout" class="link-btn" type="button">Sign out</button>
+      </div>
+
+      <ul id="group-list" class="group-list"></ul>
+
+      <div class="group-forms">
+        <form id="create-form" class="group-form" autocomplete="off">
+          <h2 class="form-title">Create a group</h2>
+          <p class="muted small">You'll be the leader and get an invite code to share.</p>
+          <label for="create-name">Group name</label>
+          <input id="create-name" maxlength="32" placeholder="Sunday Sweats" required>
+          <div id="create-code-wrap" hidden>
+            <label for="create-code">Create code <span class="hint">from whoever runs this app</span></label>
+            <input id="create-code">
+          </div>
+          <p id="create-error" class="error" role="alert" hidden></p>
+          <button class="btn primary" type="submit">Create group</button>
+        </form>
+
+        <form id="join-form" class="group-form" autocomplete="off">
+          <h2 class="form-title">Join a group</h2>
+          <p class="muted small">Ask the group leader for the 6-character invite code.</p>
+          <label for="join-code">Invite code</label>
+          <input id="join-code" maxlength="6" class="code-input" placeholder="K7MX2Q" required>
+          <p id="join-error" class="error" role="alert" hidden></p>
+          <button class="btn ghost" type="submit">Join group</button>
+        </form>
+      </div>
+    </div>
+  </main>
+
+  <!-- App -->
+  <div id="app" class="app" hidden>
+    <header class="topbar">
+      <div class="brand-row">
+        <button id="switch-group" class="group-switch" type="button" aria-label="Switch group">
+          <span id="group-name" class="brand small"></span>
+          <span class="caret" aria-hidden="true">▾</span>
+        </button>
+        <span id="demo-badge" class="pill warn" hidden>Demo odds</span>
+      </div>
+      <div class="who">
+        <span id="me-name"></span>
+      </div>
+    </header>
+
+    <nav class="tabs" aria-label="Sections">
+      <button class="tab" data-tab="slip" aria-selected="true" type="button">Slip <span id="tab-count" class="count">0</span></button>
+      <button class="tab" data-tab="find" aria-selected="false" type="button">Find props</button>
+    </nav>
+
+    <div class="panels">
+      <!-- Slip -->
+      <section id="panel-slip" class="panel" data-panel="slip">
+        <div class="slip">
+          <div class="slip-head">
+            <div>
+              <p class="eyebrow">The slip</p>
+              <p class="slip-odds"><span id="parlay-odds">—</span></p>
+              <p id="parlay-sub" class="muted">No legs yet</p>
+            </div>
+            <div class="slip-actions">
+              <button id="refresh" class="btn ghost" type="button">Refresh odds</button>
+            </div>
+          </div>
+          <ol id="legs" class="legs"></ol>
+          <div class="slip-foot">
+            <span id="updated" class="muted small"></span>
+            <span id="quota" class="muted small"></span>
+          </div>
+          <div class="bet-row">
+            <a id="place-bet" class="btn primary place-bet" target="_blank" rel="noopener" aria-disabled="true">Place bet</a>
+            <button id="clear" class="btn danger-ghost" type="button" hidden>Clear slip</button>
+            <span id="clear-confirm" hidden>
+              <span class="small">Remove every leg?</span>
+              <button id="clear-yes" class="btn danger" type="button">Yes, clear</button>
+              <button id="clear-no" class="btn ghost" type="button">Cancel</button>
+            </span>
+          </div>
+          <p id="place-bet-note" class="muted small bet-note" hidden></p>
+        </div>
+
+        <details id="group-info" class="group-info">
+          <summary><span>Invite &amp; members</span> <span id="member-count" class="muted small"></span></summary>
+          <div class="invite">
+            <span class="muted small">Invite code</span>
+            <span id="invite-code" class="invite-code"></span>
+            <button id="copy-code" class="btn ghost sm" type="button">Copy</button>
+            <button id="new-code" class="btn ghost sm" type="button" hidden>New code</button>
+          </div>
+          <div class="book-row">
+            <label for="book-select" class="muted small">Sportsbook</label>
+            <select id="book-select"></select>
+          </div>
+          <ul id="members" class="members"></ul>
+          <div class="leave-row">
+            <button id="leave" class="btn danger-ghost sm" type="button">Leave group</button>
+            <span id="leave-confirm" hidden>
+              <span class="small">Leave this group?</span>
+              <button id="leave-yes" class="btn danger sm" type="button">Leave</button>
+              <button id="leave-no" class="btn ghost sm" type="button">Cancel</button>
+            </span>
+          </div>
+        </details>
+      </section>
+
+      <!-- Find -->
+      <section id="panel-find" class="panel" data-panel="find">
+        <div class="finder">
+          <div id="sports" class="chips" role="tablist" aria-label="Sport"></div>
+          <label for="event-select" class="field-label">Game</label>
+          <select id="event-select"></select>
+          <div id="markets" class="chips scroll" role="tablist" aria-label="Market"></div>
+          <input id="search" type="search" placeholder="Search a player or team" aria-label="Search player or team">
+          <p id="find-status" class="muted small"></p>
+          <ul id="outcomes" class="outcomes"></ul>
+        </div>
+      </section>
+    </div>
+  </div>
+
+  <div id="toast" class="toast" role="status" hidden></div>
+
+  <script src="/app.js"></script>
+</body>
+</html>
