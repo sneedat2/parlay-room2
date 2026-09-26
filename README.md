@@ -4,6 +4,7 @@ A shared FanDuel betting slip for your group.
 
 - Create an account with your name, email and password (Forgot password emails you a reset code). **Create a group** to become its leader, then send friends the group's **invite link** (or its invite code). You can be in several groups; tap the group name at the top to switch.
 - The leader can remove members, let them back in, and set a custom invite code. Changing the code turns off old invite links.
+- A group can have several named slips (up to 20). Pick which slip props go on in **Find props**, and use **Move to…** on a leg to shift it between slips. Anyone can make a slip; its creator or the leader can rename, clear or delete it. Each slip has its own parlay odds and **Place bet**.
 - The leader can make a new invite code (the old one stops working) and hand leadership to someone else.
 - Search FanDuel props (player props, moneyline, spread, total) with live odds.
 - Anyone in the group can add legs.

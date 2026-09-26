@@ -4,6 +4,14 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <title>Parlay Room</title>
+  <link rel="manifest" href="/manifest.webmanifest">
+  <link rel="icon" type="image/png" sizes="32x32" href="/favicon-32.png">
+  <link rel="apple-touch-icon" href="/apple-touch-icon.png">
+  <meta name="theme-color" content="#0e1411">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="Parlay Room">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Barlow:wght@400;500;600&family=Barlow+Condensed:wght@600;700&display=swap">
@@ -178,43 +186,113 @@
     <p class="storage-warning" hidden>Heads up: this server isn't saving data permanently. Accounts, passwords and groups get erased every time the app updates. In Railway, attach a volume to the service to fix it.</p>
 
     <nav class="tabs" aria-label="Sections">
-      <button class="tab" data-tab="slip" aria-selected="true" type="button">Slip <span id="tab-count" class="count">0</span></button>
+      <button class="tab" data-tab="slip" aria-selected="true" type="button">Slips <span id="tab-count" class="count">0</span></button>
       <button class="tab" data-tab="find" aria-selected="false" type="button">Find props</button>
     </nav>
 
     <div class="panels">
       <!-- Slip -->
       <section id="panel-slip" class="panel" data-panel="slip">
+        <div id="notify-card" class="notify-card" hidden>
+          <div class="notify-text">
+            <strong>Get a ping when someone adds a leg</strong>
+            <span id="notify-card-sub" class="muted small">Even when the app is closed.</span>
+          </div>
+          <div class="notify-actions">
+            <button id="notify-card-on" class="btn primary sm" type="button">Turn on</button>
+            <button id="notify-card-later" class="link-btn" type="button">Not now</button>
+          </div>
+        </div>
+        <p id="view-only" class="view-only" hidden></p>
+
+        <!-- Slip switcher: one tab per named slip -->
+        <div class="slip-switcher">
+          <div id="slip-tabs" class="slip-tabs" role="tablist" aria-label="Slips"></div>
+          <button id="new-slip" class="btn ghost sm new-slip" type="button">+ New slip</button>
+        </div>
+        <form id="new-slip-form" class="slip-name-form" autocomplete="off" hidden>
+          <label for="new-slip-name" class="field-label">Name the new slip</label>
+          <div class="slip-name-row">
+            <input id="new-slip-name" maxlength="32" placeholder="Sunday SGP" required>
+            <button class="btn primary sm" type="submit">Create</button>
+            <button id="new-slip-cancel" class="btn ghost sm" type="button">Cancel</button>
+          </div>
+          <p id="new-slip-error" class="error" role="alert" hidden></p>
+        </form>
+
         <div class="slip">
           <div class="slip-head">
-            <div>
-              <p class="eyebrow">The slip</p>
+            <div class="slip-title">
+              <p id="slip-by" class="eyebrow"></p>
+              <h2 id="slip-name" class="slip-name"></h2>
               <p class="slip-odds"><span id="parlay-odds">—</span></p>
               <p id="parlay-sub" class="muted">No legs yet</p>
             </div>
             <div class="slip-actions">
-              <button id="refresh" class="btn ghost" type="button">Refresh odds</button>
+              <button id="rename-slip" class="btn ghost sm" type="button" hidden>Rename</button>
+              <button id="refresh" class="btn ghost sm" type="button">Refresh odds</button>
             </div>
           </div>
+          <!-- Profit boost calculator: estimate only, all on this device -->
+          <div id="boost" class="boost" hidden>
+            <div class="boost-head">
+              <label for="boost-range" class="boost-label">Profit boost</label>
+              <span id="boost-pct" class="boost-pct">25%</span>
+            </div>
+            <input id="boost-range" type="range" min="10" max="105" step="5" value="25" aria-describedby="boost-note">
+            <div class="boost-chips" role="group" aria-label="Common boosts">
+              <button class="chip sm" type="button" data-boost="25">25%</button>
+              <button class="chip sm" type="button" data-boost="30">30%</button>
+              <button class="chip sm" type="button" data-boost="50">50%</button>
+              <button class="chip sm" type="button" data-boost="100">100%</button>
+            </div>
+            <div class="boost-grid">
+              <div class="boost-cell">
+                <span class="boost-cap">Boosted odds</span>
+                <span id="boost-odds" class="boost-odds"></span>
+                <span id="boost-from" class="muted small"></span>
+              </div>
+              <div class="boost-cell">
+                <label for="boost-stake" class="boost-cap">Stake</label>
+                <span class="stake-wrap">$<input id="boost-stake" inputmode="decimal" value="10" maxlength="8" autocomplete="off"></span>
+              </div>
+              <div class="boost-cell">
+                <span class="boost-cap">Pays</span>
+                <span id="boost-pays" class="boost-pays"></span>
+                <span id="boost-extra" class="boost-extra small"></span>
+              </div>
+            </div>
+            <p id="boost-note" class="muted small boost-note">Estimate only. A profit boost raises your winnings, not your stake, and FanDuel may cap the extra winnings.</p>
+          </div>
+          <form id="rename-slip-form" class="slip-name-form inline" autocomplete="off" hidden>
+            <label for="rename-slip-name" class="field-label">New name</label>
+            <div class="slip-name-row">
+              <input id="rename-slip-name" maxlength="32" required>
+              <button class="btn primary sm" type="submit">Save</button>
+              <button id="rename-slip-cancel" class="btn ghost sm" type="button">Cancel</button>
+            </div>
+            <p id="rename-slip-error" class="error" role="alert" hidden></p>
+          </form>
           <ol id="legs" class="legs"></ol>
           <div class="slip-foot">
-            <span id="updated" class="muted small"></span>
+            <span class="muted small"><span id="live-status" class="live" hidden>Live</span> <span id="updated"></span></span>
             <span id="quota" class="muted small"></span>
           </div>
           <div class="bet-row">
             <a id="place-bet" class="btn primary place-bet" target="_blank" rel="noopener" aria-disabled="true">Place bet</a>
             <button id="clear" class="btn danger-ghost" type="button" hidden>Clear slip</button>
-            <span id="clear-confirm" hidden>
-              <span class="small">Remove every leg?</span>
-              <button id="clear-yes" class="btn danger" type="button">Yes, clear</button>
-              <button id="clear-no" class="btn ghost" type="button">Cancel</button>
-            </span>
+            <button id="delete-slip" class="btn danger-ghost" type="button" hidden>Delete slip</button>
+          </div>
+          <div id="slip-confirm" class="slip-confirm" hidden>
+            <span id="slip-confirm-text" class="small"></span>
+            <button id="slip-confirm-yes" class="btn danger sm" type="button"></button>
+            <button id="slip-confirm-no" class="btn ghost sm" type="button">Cancel</button>
           </div>
           <p id="place-bet-note" class="muted small bet-note" hidden></p>
         </div>
 
         <details id="group-info" class="group-info">
-          <summary><span>Invite &amp; members</span> <span id="member-count" class="muted small"></span></summary>
+          <summary><span>Invite, members &amp; notifications</span> <span id="member-count" class="muted small"></span></summary>
           <div class="invite-link">
             <span class="muted small">Invite link</span>
             <span id="invite-link" class="invite-link-text"></span>
@@ -240,9 +318,35 @@
             <p class="muted small">The old code and old invite links stop working as soon as you save.</p>
             <p id="code-error" class="error" role="alert" hidden></p>
           </form>
+          <div class="notify-row">
+            <div>
+              <span class="notify-row-title">Notifications</span>
+              <span id="notify-status" class="muted small"></span>
+            </div>
+            <div class="notify-actions">
+              <button id="notify-on" class="btn primary sm" type="button" hidden>Turn on</button>
+              <button id="notify-test" class="btn ghost sm" type="button" hidden>Send test</button>
+              <button id="notify-off" class="btn ghost sm" type="button" hidden>Turn off</button>
+            </div>
+          </div>
+          <div id="ios-install" class="ios-install" hidden>
+            <strong>On iPhone, add Parlay Room to your Home Screen first:</strong>
+            <ol>
+              <li>In Safari, tap the <strong>Share</strong> button (square with an arrow).</li>
+              <li>Tap <strong>Add to Home Screen</strong>, then <strong>Add</strong>.</li>
+              <li>Open Parlay Room from its new icon and tap <strong>Turn on</strong> here.</li>
+            </ol>
+          </div>
           <div class="book-row">
             <label for="book-select" class="muted small">Sportsbook</label>
             <select id="book-select"></select>
+          </div>
+          <div class="lock-row">
+            <div>
+              <span class="notify-row-title">Who can change slips</span>
+              <span id="lock-status" class="muted small"></span>
+            </div>
+            <button id="lock-toggle" class="btn ghost sm" type="button" hidden></button>
           </div>
           <ul id="members" class="members"></ul>
           <div id="removed-wrap" hidden>
@@ -263,10 +367,21 @@
       <!-- Find -->
       <section id="panel-find" class="panel" data-panel="find">
         <div class="finder">
+          <div class="add-to">
+            <label for="add-to-slip" class="field-label">Add props to</label>
+            <select id="add-to-slip"></select>
+          </div>
           <div id="sports" class="chips" role="tablist" aria-label="Sport"></div>
           <label for="event-select" class="field-label">Game</label>
           <select id="event-select"></select>
-          <div id="markets" class="chips scroll" role="tablist" aria-label="Market"></div>
+          <div class="market-row">
+            <span class="row-label">Player props</span>
+            <div id="markets-player" class="chips scroll" role="tablist" aria-label="Player props"></div>
+          </div>
+          <div class="market-row">
+            <span class="row-label">Game lines</span>
+            <div id="markets-game" class="chips scroll" role="tablist" aria-label="Game lines"></div>
+          </div>
           <input id="search" type="search" placeholder="Search a player or team" aria-label="Search player or team">
           <p id="find-status" class="muted small"></p>
           <ul id="outcomes" class="outcomes"></ul>

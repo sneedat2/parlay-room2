@@ -6,6 +6,10 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 
+// Phone/desktop notifications. Optional: if the package is missing, the app runs without them.
+let webpush = null;
+try { webpush = require('web-push'); } catch { console.warn('web-push is not installed, so notifications are off. Run `npm install`.'); }
+
 loadEnvFile(path.join(__dirname, '.env'));
 
 const PORT = Number(process.env.PORT) || 3000;
@@ -36,52 +40,94 @@ const EMAIL_ON = !!((BREVO_API_KEY || RESEND_API_KEY) && MAIL_FROM);
 
 // ---------------------------------------------------------------- sports & markets
 
-const GAME_MARKETS = [
-  { key: 'h2h', label: 'Moneyline' },
-  { key: 'spreads', label: 'Spread' },
-  { key: 'totals', label: 'Total' },
+// Market keys are The Odds API's (https://the-odds-api.com/sports-odds-data/betting-markets.html).
+// group: 'player' = player props row, 'game' = game lines row in Find props.
+const player = (key, label) => ({ key, label, group: 'player' });
+const game = (key, label) => ({ key, label, group: 'game' });
+
+// Full-game lines every sport shares. `spread` is what the sport calls it (Spread / Run Line / Puck Line).
+const gameLines = (spread) => [
+  game('h2h', 'Moneyline'),
+  game('spreads', spread),
+  game('totals', 'Total'),
+  game('alternate_spreads', `Alt ${spread}s`),
+  game('alternate_totals', 'Alt Totals'),
+  game('team_totals', 'Team Totals'),
+  game('alternate_team_totals', 'Alt Team Totals'),
 ];
-const FOOTBALL_PROPS = [
-  { key: 'player_pass_yds', label: 'Pass Yds' },
-  { key: 'player_pass_tds', label: 'Pass TDs' },
-  { key: 'player_rush_yds', label: 'Rush Yds' },
-  { key: 'player_reception_yds', label: 'Rec Yds' },
-  { key: 'player_receptions', label: 'Receptions' },
-  { key: 'player_anytime_td', label: 'Anytime TD' },
+const halvesAndQuarters = [
+  game('h2h_h1', '1H Moneyline'),
+  game('spreads_h1', '1H Spread'),
+  game('totals_h1', '1H Total'),
+  game('spreads_q1', '1Q Spread'),
+  game('totals_q1', '1Q Total'),
 ];
-const BASKETBALL_PROPS = [
-  { key: 'player_points', label: 'Points' },
-  { key: 'player_rebounds', label: 'Rebounds' },
-  { key: 'player_assists', label: 'Assists' },
-  { key: 'player_threes', label: 'Threes' },
-  { key: 'player_points_rebounds_assists', label: 'PRA' },
+
+const FOOTBALL = [
+  player('player_pass_yds', 'Pass Yds'),
+  player('player_pass_tds', 'Pass TDs'),
+  player('player_rush_yds', 'Rush Yds'),
+  player('player_reception_yds', 'Rec Yds'),
+  player('player_receptions', 'Receptions'),
+  player('player_rush_reception_yds', 'Rush+Rec Yds'),
+  player('player_anytime_td', 'Anytime TD'),
+  player('player_1st_td', 'First TD'),
+  player('player_last_td', 'Last TD'),
+  player('player_tds_over', 'Total TDs'),
+  ...gameLines('Spread'),
+  ...halvesAndQuarters,
 ];
+const BASKETBALL = [
+  player('player_points', 'Points'),
+  player('player_rebounds', 'Rebounds'),
+  player('player_assists', 'Assists'),
+  player('player_threes', 'Threes'),
+  player('player_points_rebounds_assists', 'PRA'),
+  player('player_points_rebounds', 'Pts+Reb'),
+  player('player_points_assists', 'Pts+Ast'),
+  player('player_double_double', 'Double-Double'),
+  player('player_triple_double', 'Triple-Double'),
+  player('player_first_basket', 'First Basket'),
+  ...gameLines('Spread'),
+  ...halvesAndQuarters,
+];
+const BASEBALL = [
+  player('batter_hits', 'Hits'),
+  player('batter_total_bases', 'Total Bases'),
+  player('batter_home_runs', 'Home Runs'),
+  player('batter_first_home_run', 'First Home Run'),
+  player('batter_rbis', 'RBIs'),
+  player('batter_runs_scored', 'Runs'),
+  player('batter_hits_runs_rbis', 'H+R+RBI'),
+  player('pitcher_strikeouts', 'Strikeouts'),
+  player('pitcher_outs', 'Pitcher Outs'),
+  player('pitcher_hits_allowed', 'Hits Allowed'),
+  ...gameLines('Run Line'),
+  game('h2h_1st_5_innings', 'F5 Moneyline'),
+  game('spreads_1st_5_innings', 'F5 Run Line'),
+  game('totals_1st_5_innings', 'F5 Total'),
+  game('totals_1st_1_innings', '1st Inning (NRFI/YRFI)'),
+];
+const HOCKEY = [
+  player('player_goal_scorer_anytime', 'Anytime Goal'),
+  player('player_goal_scorer_first', 'First Goal'),
+  player('player_points', 'Points'),
+  player('player_shots_on_goal', 'Shots'),
+  player('player_assists', 'Assists'),
+  player('player_total_saves', 'Saves'),
+  ...gameLines('Puck Line'),
+  game('h2h_p1', '1P Moneyline'),
+  game('totals_p1', '1P Total'),
+];
+
 const SPORTS = [
-  { key: 'americanfootball_nfl', title: 'NFL', markets: [...FOOTBALL_PROPS, ...GAME_MARKETS] },
-  { key: 'americanfootball_ncaaf', title: 'NCAAF', markets: [...FOOTBALL_PROPS, ...GAME_MARKETS] },
-  { key: 'basketball_nba', title: 'NBA', markets: [...BASKETBALL_PROPS, ...GAME_MARKETS] },
-  { key: 'basketball_wnba', title: 'WNBA', markets: [...BASKETBALL_PROPS, ...GAME_MARKETS] },
-  { key: 'basketball_ncaab', title: 'NCAAB', markets: [...BASKETBALL_PROPS, ...GAME_MARKETS] },
-  {
-    key: 'baseball_mlb', title: 'MLB', markets: [
-      { key: 'batter_hits', label: 'Hits' },
-      { key: 'batter_total_bases', label: 'Total Bases' },
-      { key: 'batter_home_runs', label: 'Home Runs' },
-      { key: 'batter_rbis', label: 'RBIs' },
-      { key: 'batter_hits_runs_rbis', label: 'H+R+RBI' },
-      { key: 'pitcher_strikeouts', label: 'Strikeouts' },
-      ...GAME_MARKETS,
-    ],
-  },
-  {
-    key: 'icehockey_nhl', title: 'NHL', markets: [
-      { key: 'player_goal_scorer_anytime', label: 'Anytime Goal' },
-      { key: 'player_points', label: 'Points' },
-      { key: 'player_shots_on_goal', label: 'Shots' },
-      { key: 'player_assists', label: 'Assists' },
-      ...GAME_MARKETS,
-    ],
-  },
+  { key: 'americanfootball_nfl', title: 'NFL', markets: FOOTBALL },
+  { key: 'americanfootball_ncaaf', title: 'NCAAF', markets: FOOTBALL },
+  { key: 'basketball_nba', title: 'NBA', markets: BASKETBALL },
+  { key: 'basketball_wnba', title: 'WNBA', markets: BASKETBALL },
+  { key: 'basketball_ncaab', title: 'NCAAB', markets: BASKETBALL },
+  { key: 'baseball_mlb', title: 'MLB', markets: BASEBALL },
+  { key: 'icehockey_nhl', title: 'NHL', markets: HOCKEY },
 ];
 const sportByKey = (k) => SPORTS.find((s) => s.key === k);
 
@@ -94,7 +140,7 @@ const marketLabel = (sport, m) => sportByKey(sport)?.markets.find((x) => x.key =
 
 // ---------------------------------------------------------------- storage
 
-// members = accounts (name + email + password). Each group has its own leader, members and slip.
+// members = accounts (name + email + password). Each group has its own leader, members and named slips.
 let db = { members: [], sessions: {}, groups: [] };
 fs.mkdirSync(path.dirname(DATA_FILE), { recursive: true });
 let savedText = null;
@@ -134,6 +180,19 @@ function migrateSingleGroup() {
   db.members.forEach((m) => delete m.isLeader);
 }
 
+// Groups used to have one slip (group.legs). Now each group has named slips; old legs become "Main slip".
+const newSlip = (name, createdBy, legs = []) => ({ id: newId(), name, createdBy, createdAt: new Date().toISOString(), legs });
+function migrateSlips() {
+  let changed = false;
+  for (const g of db.groups) {
+    if (Array.isArray(g.slips) && g.slips.length) continue;
+    g.slips = [newSlip('Main slip', g.leaderId, g.legs || [])];
+    delete g.legs;
+    changed = true;
+  }
+  return changed;
+}
+
 function save() {
   const tmp = DATA_FILE + '.tmp';
   // Write the full copy, flush it to disk, then swap it in, so a crash mid-save can't leave half a file.
@@ -162,14 +221,24 @@ function groupView(g) {
   const people = (ids) => (ids || [])
     .map((id) => db.members.find((m) => m.id === id))
     .filter(Boolean);
-  const members = people(g.memberIds).map((m) => ({ id: m.id, name: m.name, isLeader: m.id === g.leaderId }));
+  const editors = g.editorIds || [];
+  const members = people(g.memberIds).map((m) => ({
+    id: m.id, name: m.name, isLeader: m.id === g.leaderId, isEditor: editors.includes(m.id),
+  }));
   const removed = people(g.bannedIds).map((m) => ({ id: m.id, name: m.name }));
   const book = bookFor(g);
   return {
     id: g.id, name: g.name, code: g.code, leaderId: g.leaderId, members, removed,
+    locked: !!g.locked,
     sportsbook: { key: book.key, title: book.title },
   };
 }
+
+// Locked groups: only the leader and chosen editors change slips; everyone else views and bets.
+// Unlocked groups: anyone adds; you manage your own legs/slips; the leader manages everything.
+const isGroupEditor = (g, memberId) => g.leaderId === memberId || (g.editorIds || []).includes(memberId);
+const canEditGroup = (g, memberId) => !g.locked || isGroupEditor(g, memberId);
+const LOCKED_MSG = 'This group is locked. Only the leader and editors can change slips and props.';
 
 const normalizeEmail = (e) => String(e || '').trim().toLowerCase();
 const validEmail = (e) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(e) && e.length <= 254;
@@ -212,6 +281,58 @@ function newSession(member) {
 }
 
 migrateSingleGroup();
+if (migrateSlips()) save();
+
+// ---------------------------------------------------------------- push notifications
+
+// Keys that identify this server to Apple/Google push services. Made once and kept with the data,
+// so nothing to configure. VAPID_PUBLIC_KEY / VAPID_PRIVATE_KEY env vars override them.
+let PUSH_PUBLIC_KEY = null;
+function setupPush() {
+  if (!webpush) return;
+  let pub = process.env.VAPID_PUBLIC_KEY;
+  let priv = process.env.VAPID_PRIVATE_KEY;
+  if (!pub || !priv) {
+    if (!db.vapid) { db.vapid = webpush.generateVAPIDKeys(); save(); }
+    ({ publicKey: pub, privateKey: priv } = db.vapid);
+  }
+  webpush.setVapidDetails(process.env.PUSH_CONTACT || `mailto:${MAIL_FROM || 'noreply@parlayroom.app'}`, pub, priv);
+  PUSH_PUBLIC_KEY = pub;
+}
+setupPush();
+
+const b64urlLength = (s) => (typeof s === 'string' && /^[A-Za-z0-9_-]+=*$/.test(s) ? Buffer.from(s, 'base64url').length : -1);
+function validSubscription(s) {
+  return s && typeof s.endpoint === 'string' && /^https:\/\//.test(s.endpoint) && s.endpoint.length < 1000
+    && s.keys && b64urlLength(s.keys.p256dh) === 65 && b64urlLength(s.keys.auth) === 16;
+}
+
+// Send to every device of the given members. Dead subscriptions (uninstalled, permission revoked) get dropped.
+async function pushTo(memberIds, payload) {
+  if (!PUSH_PUBLIC_KEY) return;
+  const body = JSON.stringify(payload);
+  let dirty = false;
+  await Promise.all(memberIds.flatMap((id) => {
+    const m = db.members.find((x) => x.id === id);
+    return (m?.pushSubs || []).map(async (sub) => {
+      try {
+        await webpush.sendNotification(sub, body, { TTL: 6 * 3600, urgency: 'high' });
+      } catch (err) {
+        // 404/410: the device unsubscribed or uninstalled. 400/403 or no status: the subscription itself is
+        // unusable (bad keys, key mismatch). All of these will never work again, so drop them.
+        if ([400, 403, 404, 410].includes(err.statusCode) || !err.statusCode && !/ENOTFOUND|ETIMEDOUT|ECONNRESET|EAI_AGAIN|ECONNREFUSED/.test(err.code || err.message)) {
+          m.pushSubs = m.pushSubs.filter((s) => s.endpoint !== sub.endpoint);
+          dirty = true;
+        } else {
+          console.error(`Notification to ${m.name} failed: ${err.statusCode || ''} ${err.body || err.message}`.trim());
+        }
+      }
+    });
+  }));
+  if (dirty) save();
+}
+
+const fmtOdds = (p) => (p > 0 ? `+${p}` : `${p}`);
 
 // ---------------------------------------------------------------- The Odds API
 
@@ -265,9 +386,12 @@ const milestone = (o) => o.name === 'Over' && o.point != null && o.point % 1 !==
 
 function describeOutcome(market, o, isAlt) {
   if (isAlt && o.description && milestone(o)) return `${o.description} ${Math.ceil(o.point)}+`;
-  const pt = o.point == null ? '' : ` ${market === 'spreads' && o.point > 0 ? '+' : ''}${o.point}`;
-  if (o.description) return `${o.description} ${o.name}${pt}`; // player props: description = player
-  if (market === 'h2h') return `${o.name} ML`;
+  // Spreads of any kind (alt, 1H, run line...) show the sign: "Bills +3.5"
+  const pt = o.point == null ? '' : ` ${market.includes('spreads') && o.point > 0 ? '+' : ''}${o.point}`;
+  // Yes-only props (First TD, Double-Double...): just the player; the market name says the rest.
+  if (o.description && o.name === 'Yes' && o.point == null) return o.description;
+  if (o.description) return `${o.description} ${o.name}${pt}`; // player props & team totals: description = player/team
+  if (market.startsWith('h2h')) return `${o.name} ML`;
   return `${o.name}${pt}`;
 }
 
@@ -276,8 +400,9 @@ function describeOutcome(market, o, isAlt) {
 const ALT_MARKETS = new Set([
   'player_pass_yds', 'player_pass_tds', 'player_rush_yds', 'player_reception_yds', 'player_receptions',
   'player_points', 'player_rebounds', 'player_assists', 'player_threes', 'player_points_rebounds_assists',
-  'batter_hits', 'batter_total_bases', 'batter_home_runs', 'batter_rbis', 'batter_hits_runs_rbis',
-  'pitcher_strikeouts', 'player_shots_on_goal',
+  'player_rush_reception_yds', 'player_points_rebounds', 'player_points_assists',
+  'batter_hits', 'batter_total_bases', 'batter_home_runs', 'batter_rbis', 'batter_hits_runs_rbis', 'batter_runs_scored',
+  'pitcher_strikeouts', 'pitcher_outs', 'pitcher_hits_allowed', 'player_shots_on_goal', 'player_total_saves',
 ]);
 const altKey = (market) => (ALT_MARKETS.has(market) ? `${market}_alternate` : null);
 
@@ -362,6 +487,49 @@ function parlayLink(legs) {
 
 const failedJoins = new Map(); // ip -> { count, until }
 
+// ---------------------------------------------------------------- live updates (Server-Sent Events)
+// Each open screen keeps one connection per group. When the slip or group changes, every screen
+// in that group is told right away and reloads the slip. Polling stays on as a backup.
+
+const liveStreams = new Map(); // groupId -> Set<res>
+const liveTickets = new Map(); // one-time ticket -> { memberId, groupId, expires }
+
+function notifyGroup(groupId, what) {
+  const payload = `event: changed\ndata: ${JSON.stringify({ what, at: Date.now() })}\n\n`;
+  for (const res of liveStreams.get(groupId) || []) res.write(payload);
+}
+
+function dropFromLive(groupId, memberId) {
+  for (const res of liveStreams.get(groupId) || []) if (res.memberId === memberId) res.end();
+}
+
+// Proxies close quiet connections; a comment line every 25s keeps them open.
+setInterval(() => {
+  for (const set of liveStreams.values()) for (const res of set) res.write(': ping\n\n');
+  for (const [t, v] of liveTickets) if (v.expires < Date.now()) liveTickets.delete(t);
+}, 25000).unref();
+
+function openLiveStream(req, res, ticket) {
+  const t = liveTickets.get(ticket);
+  liveTickets.delete(ticket);
+  const group = t && t.expires > Date.now() && db.groups.find((g) => g.id === t.groupId);
+  if (!group || !group.memberIds.includes(t.memberId)) return send(res, 403, { error: 'Live updates need a fresh ticket.' });
+  res.writeHead(200, {
+    'Content-Type': 'text/event-stream',
+    'Cache-Control': 'no-cache, no-transform',
+    Connection: 'keep-alive',
+    'X-Accel-Buffering': 'no',
+  });
+  res.write('retry: 5000\n\n');
+  res.memberId = t.memberId;
+  if (!liveStreams.has(group.id)) liveStreams.set(group.id, new Set());
+  liveStreams.get(group.id).add(res);
+  req.on('close', () => {
+    const set = liveStreams.get(group.id);
+    if (set) { set.delete(res); if (!set.size) liveStreams.delete(group.id); }
+  });
+}
+
 function send(res, status, body) {
   res.writeHead(status, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
   res.end(JSON.stringify(body));
@@ -387,7 +555,10 @@ function currentMember(req) {
   return id ? db.members.find((m) => m.id === id) : null;
 }
 
-const MIME = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript', '.css': 'text/css', '.svg': 'image/svg+xml', '.png': 'image/png' };
+const MIME = {
+  '.html': 'text/html; charset=utf-8', '.js': 'text/javascript', '.css': 'text/css', '.svg': 'image/svg+xml',
+  '.png': 'image/png', '.webmanifest': 'application/manifest+json', '.json': 'application/json', '.ico': 'image/x-icon',
+};
 
 function serveStatic(req, res, pathname) {
   // Invite links (/join/CODE) open the app, which reads the code from the address.
@@ -396,7 +567,12 @@ function serveStatic(req, res, pathname) {
   if (!file.startsWith(PUBLIC_DIR)) return send(res, 404, { error: 'Not found' });
   fs.readFile(file, (err, buf) => {
     if (err) return send(res, 404, { error: 'Not found' });
-    res.writeHead(200, { 'Content-Type': MIME[path.extname(file)] || 'application/octet-stream' });
+    const ext = path.extname(file);
+    res.writeHead(200, {
+      'Content-Type': MIME[ext] || 'application/octet-stream',
+      // Always check for a newer app version (home-screen apps otherwise hang on to old files).
+      'Cache-Control': ext === '.png' ? 'public, max-age=86400' : 'no-cache',
+    });
     res.end(buf);
   });
 }
@@ -531,6 +707,11 @@ async function handleApi(req, res, url) {
     return send(res, 200, { token });
   }
 
+  // EventSource can't send the sign-in header, so it brings a one-time ticket instead.
+  if (pathname === '/api/live' && req.method === 'GET') {
+    return openLiveStream(req, res, url.searchParams.get('ticket') || '');
+  }
+
   const me = currentMember(req);
   if (!me) return send(res, 401, { error: 'Sign in first.' });
 
@@ -574,6 +755,35 @@ async function handleApi(req, res, url) {
     return send(res, 200, { ok: true });
   }
 
+  if (pathname === '/api/push/key' && req.method === 'GET') {
+    return send(res, 200, { publicKey: PUSH_PUBLIC_KEY });
+  }
+
+  if (pathname === '/api/push/subscribe' && req.method === 'POST') {
+    if (!PUSH_PUBLIC_KEY) return send(res, 503, { error: "Notifications aren't available on this server yet." });
+    const { subscription } = await readBody(req);
+    if (!validSubscription(subscription)) return send(res, 400, { error: "Your browser sent a notification setup we can't use. Try again." });
+    const sub = { endpoint: subscription.endpoint, keys: { p256dh: subscription.keys.p256dh, auth: subscription.keys.auth }, addedAt: new Date().toISOString() };
+    // One device = one account: if someone else signed in here before, stop sending them this device's alerts.
+    for (const m of db.members) if (m.pushSubs) m.pushSubs = m.pushSubs.filter((s) => s.endpoint !== sub.endpoint);
+    me.pushSubs = [...(me.pushSubs || []), sub].slice(-10);
+    save();
+    return send(res, 200, { ok: true });
+  }
+
+  if (pathname === '/api/push/unsubscribe' && req.method === 'POST') {
+    const { endpoint } = await readBody(req);
+    me.pushSubs = (me.pushSubs || []).filter((s) => s.endpoint !== endpoint);
+    save();
+    return send(res, 200, { ok: true });
+  }
+
+  if (pathname === '/api/push/test' && req.method === 'POST') {
+    if (!(me.pushSubs || []).length) return send(res, 400, { error: 'Turn on notifications first.' });
+    await pushTo([me.id], { title: 'Parlay Room', body: "Notifications are working. You'll hear about new legs here.", url: '/', tag: 'test' });
+    return send(res, 200, { ok: true });
+  }
+
   if (pathname === '/api/groups' && req.method === 'POST') {
     const { name, createCode } = await readBody(req);
     const cleanName = String(name || '').trim().slice(0, 32);
@@ -581,7 +791,7 @@ async function handleApi(req, res, url) {
     if (CREATE_CODE && createCode !== CREATE_CODE) return fail(403, 'That create code is wrong.');
     const g = {
       id: newId(), name: cleanName, code: newInviteCode(), leaderId: me.id,
-      memberIds: [me.id], legs: [], sportsbook: SPORTSBOOKS[0].key, createdAt: new Date().toISOString(),
+      memberIds: [me.id], slips: [newSlip('Main slip', me.id)], sportsbook: SPORTSBOOKS[0].key, createdAt: new Date().toISOString(),
     };
     db.groups.push(g);
     save();
@@ -599,6 +809,7 @@ async function handleApi(req, res, url) {
     }
     if (!g.memberIds.includes(me.id)) g.memberIds.push(me.id);
     save();
+    notifyGroup(g.id, 'members');
     return send(res, 200, { group: groupView(g) });
   }
 
@@ -609,13 +820,22 @@ async function handleApi(req, res, url) {
   const sub = gm ? gm[2] || '' : null;
   const isLeader = group && group.leaderId === me.id;
 
+  if (group && sub === '/live-ticket' && req.method === 'POST') {
+    const ticket = crypto.randomBytes(18).toString('base64url');
+    liveTickets.set(ticket, { memberId: me.id, groupId: group.id, expires: Date.now() + 60 * 1000 });
+    return send(res, 200, { ticket });
+  }
+
   if (group && sub === '/leave' && req.method === 'POST') {
     if (isLeader && group.memberIds.length > 1) {
       return send(res, 409, { error: 'Make someone else leader before you leave.' });
     }
     group.memberIds = group.memberIds.filter((id) => id !== me.id);
+    group.editorIds = (group.editorIds || []).filter((id) => id !== me.id);
     if (!group.memberIds.length) db.groups = db.groups.filter((g) => g.id !== group.id);
     save();
+    dropFromLive(group.id, me.id);
+    notifyGroup(group.id, 'members');
     return send(res, 200, { ok: true });
   }
 
@@ -623,8 +843,11 @@ async function handleApi(req, res, url) {
     if (!isLeader) return send(res, 403, { error: 'Only the group leader can hand off leadership.' });
     const { memberId } = await readBody(req);
     if (!group.memberIds.includes(memberId)) return send(res, 400, { error: "That person isn't in this group." });
+    // The old leader keeps editing rights; the new leader doesn't need an editor spot.
+    group.editorIds = [...new Set([...(group.editorIds || []).filter((id) => id !== memberId), me.id])];
     group.leaderId = memberId;
     save();
+    notifyGroup(group.id, 'members');
     return send(res, 200, { group: groupView(group) });
   }
 
@@ -634,6 +857,7 @@ async function handleApi(req, res, url) {
     if (!SPORTSBOOKS.some((b) => b.key === sportsbook)) return send(res, 400, { error: 'That sportsbook isn’t supported yet.' });
     group.sportsbook = sportsbook;
     save();
+    notifyGroup(group.id, 'settings');
     return send(res, 200, { group: groupView(group) });
   }
 
@@ -651,6 +875,28 @@ async function handleApi(req, res, url) {
       group.code = clean;
     }
     save();
+    notifyGroup(group.id, 'settings');
+    return send(res, 200, { group: groupView(group) });
+  }
+
+  if (group && sub === '/lock' && req.method === 'POST') {
+    if (!isLeader) return send(res, 403, { error: 'Only the group leader can lock or unlock the group.' });
+    group.locked = !!(await readBody(req)).locked;
+    save();
+    notifyGroup(group.id, 'settings');
+    return send(res, 200, { group: groupView(group) });
+  }
+
+  if (group && sub === '/editors' && req.method === 'POST') {
+    if (!isLeader) return send(res, 403, { error: 'Only the group leader can choose editors.' });
+    const { memberId, editor } = await readBody(req);
+    if (!group.memberIds.includes(memberId)) return send(res, 404, { error: "That person isn't in this group." });
+    if (memberId === group.leaderId) return send(res, 400, { error: 'The leader can always edit.' });
+    const set = new Set(group.editorIds || []);
+    if (editor) set.add(memberId); else set.delete(memberId);
+    group.editorIds = [...set];
+    save();
+    notifyGroup(group.id, 'settings');
     return send(res, 200, { group: groupView(group) });
   }
 
@@ -660,8 +906,11 @@ async function handleApi(req, res, url) {
     if (memberId === me.id) return send(res, 400, { error: "You can't remove yourself. Use Leave group instead." });
     if (!group.memberIds.includes(memberId)) return send(res, 404, { error: "That person isn't in this group." });
     group.memberIds = group.memberIds.filter((id) => id !== memberId);
+    group.editorIds = (group.editorIds || []).filter((id) => id !== memberId);
     group.bannedIds = [...new Set([...(group.bannedIds || []), memberId])];
     save();
+    notifyGroup(group.id, 'members'); // the removed person's screen hears this too, then gets sent back to their groups
+    dropFromLive(group.id, memberId);
     return send(res, 200, { group: groupView(group) });
   }
 
@@ -670,6 +919,7 @@ async function handleApi(req, res, url) {
     const { memberId } = await readBody(req);
     group.bannedIds = (group.bannedIds || []).filter((id) => id !== memberId);
     save();
+    notifyGroup(group.id, 'members');
     return send(res, 200, { group: groupView(group) });
   }
 
@@ -703,28 +953,89 @@ async function handleApi(req, res, url) {
     return send(res, 200, { ...(await getProps(sport, event, market)), quota });
   }
 
-  if (group && sub === '/legs' && req.method === 'GET') {
+  // ---- Slips: every group has one or more named slips, each with its own legs and Place bet.
+
+  // Everything the slip screen needs, in one call.
+  if (group && sub === '/slips' && req.method === 'GET') {
     if (url.searchParams.get('fresh') === '1') await refreshLegOdds(group);
-    const slipLink = parlayLink(group.legs.filter((l) => !l.unavailable));
     return send(res, 200, {
       group: groupView(group),
-      legs: group.legs,
-      // Place bet: load the whole slip when every leg has a betslip link, else open the book.
-      placeBet: { url: slipLink || bookFor(group).home, loadsSlip: !!slipLink },
+      slips: group.slips.map((s) => {
+        const slipLink = parlayLink(s.legs.filter((l) => !l.unavailable));
+        return {
+          ...s,
+          // Place bet: load the whole slip when every leg has a betslip link, else open the book.
+          placeBet: { url: slipLink || bookFor(group).home, loadsSlip: !!slipLink },
+        };
+      }),
       quota,
       demo: DEMO,
       at: new Date().toISOString(),
     });
   }
 
-  if (group && sub === '/legs' && req.method === 'POST') {
+  const slipNameProblem = (name, exceptId) => {
+    const clean = String(name || '').trim().replace(/\s+/g, ' ');
+    if (!clean) return { error: 'Give the slip a name.' };
+    if (clean.length > 32) return { error: 'Slip names can be up to 32 characters.' };
+    if (group.slips.some((s) => s.id !== exceptId && s.name.toLowerCase() === clean.toLowerCase())) {
+      return { error: 'This group already has a slip with that name.' };
+    }
+    return { clean };
+  };
+
+  if (group && sub === '/slips' && req.method === 'POST') {
+    if (!canEditGroup(group, me.id)) return send(res, 403, { error: LOCKED_MSG });
+    if (group.slips.length >= 20) return send(res, 400, { error: 'A group can have up to 20 slips. Delete one first.' });
+    const { error, clean } = slipNameProblem((await readBody(req)).name);
+    if (error) return send(res, 400, { error });
+    const slip = newSlip(clean, me.id);
+    group.slips.push(slip);
+    save();
+    notifyGroup(group.id, 'slips');
+    return send(res, 201, { slip });
+  }
+
+  const slipMatch = group && sub.match(/^\/slips\/([\w-]+)(\/.*)?$/);
+  const slip = slipMatch && group.slips.find((s) => s.id === slipMatch[1]);
+  if (slipMatch && !slip) return send(res, 404, { error: 'That slip was deleted. Pick another one.' });
+  const slipSub = slipMatch ? slipMatch[2] || '' : null;
+  const canManageSlip = slip && (group.locked
+    ? isGroupEditor(group, me.id)
+    : slip.createdBy === me.id || isLeader);
+  const slipDenied = (verb) => (group.locked ? LOCKED_MSG : `Only the person who made this slip or the group leader can ${verb} it.`);
+
+  // Rename
+  if (slip && slipSub === '' && req.method === 'PATCH') {
+    if (!canManageSlip) return send(res, 403, { error: slipDenied('rename') });
+    const { error, clean } = slipNameProblem((await readBody(req)).name, slip.id);
+    if (error) return send(res, 400, { error });
+    slip.name = clean;
+    save();
+    notifyGroup(group.id, 'slips');
+    return send(res, 200, { slip });
+  }
+
+  // Delete the whole slip
+  if (slip && slipSub === '' && req.method === 'DELETE') {
+    if (!canManageSlip) return send(res, 403, { error: slipDenied('delete') });
+    if (group.slips.length === 1) return send(res, 400, { error: "This is the group's only slip. Clear it instead." });
+    group.slips = group.slips.filter((s) => s.id !== slip.id);
+    save();
+    notifyGroup(group.id, 'slips');
+    return send(res, 200, { ok: true });
+  }
+
+  // Add a leg to this slip
+  if (slip && slipSub === '/legs' && req.method === 'POST') {
+    if (!canEditGroup(group, me.id)) return send(res, 403, { error: LOCKED_MSG });
     const { sport, eventId, market, key, note } = await readBody(req);
     if (!sportByKey(sport)) return send(res, 400, { error: 'Unknown sport.' });
     const props = await getProps(sport, eventId, market);
     const o = props.outcomes.find((x) => x.key === key);
     if (!o) return send(res, 404, { error: 'FanDuel no longer offers that line. Refresh and try again.' });
-    if (group.legs.some((l) => l.eventId === eventId && l.market === market && l.key === key)) {
-      return send(res, 409, { error: 'That leg is already on the slip.' });
+    if (slip.legs.some((l) => l.eventId === eventId && l.market === market && l.key === key)) {
+      return send(res, 409, { error: `That leg is already on ${slip.name}.` });
     }
     const leg = {
       id: newId(),
@@ -738,37 +1049,73 @@ async function handleApi(req, res, url) {
       addedBy: me.id, addedAt: new Date().toISOString(),
       oddsAt: new Date().toISOString(), unavailable: false,
     };
-    group.legs.push(leg);
+    slip.legs.push(leg);
     save();
+    notifyGroup(group.id, 'legs');
+    // Ping everyone else's phone. Don't make the adder wait for it.
+    // Name the market unless the line already says it ("Bills ML", "Bills -3.5", "Over 46.5").
+    const plain = ['h2h', 'spreads', 'totals'].includes(leg.market);
+    const what = plain ? leg.label : `${leg.label} ${leg.marketLabel}`;
+    pushTo(group.memberIds.filter((id) => id !== me.id), {
+      title: group.name,
+      body: `${me.name} added ${what} to ${slip.name} (${fmtOdds(leg.price)})`,
+      url: `/?g=${group.id}&s=${slip.id}`,
+      tag: `leg-${leg.id}`,
+    }).catch((err) => console.error('Notification send failed:', err.message));
     return send(res, 201, { leg });
   }
 
-  const legMatch = group && sub.match(/^\/legs\/([\w-]+)$/);
-  if (legMatch && req.method === 'DELETE') {
-    const leg = group.legs.find((l) => l.id === legMatch[1]);
-    if (!leg) return send(res, 404, { error: 'That leg was already removed.' });
-    if (leg.addedBy !== me.id && !isLeader) {
-      return send(res, 403, { error: 'Only the person who added this leg or the group leader can remove it.' });
-    }
-    group.legs = group.legs.filter((l) => l.id !== leg.id);
+  // Clear every leg off this slip
+  if (slip && slipSub === '/legs' && req.method === 'DELETE') {
+    if (!canManageSlip) return send(res, 403, { error: slipDenied('clear') });
+    slip.legs = [];
     save();
+    notifyGroup(group.id, 'legs');
     return send(res, 200, { ok: true });
   }
 
-  if (group && sub === '/legs' && req.method === 'DELETE') {
-    if (!isLeader) return send(res, 403, { error: 'Only the group leader can clear the slip.' });
-    group.legs = [];
+  const legMatch = slip && slipSub.match(/^\/legs\/([\w-]+)(\/move)?$/);
+  const leg = legMatch && slip.legs.find((l) => l.id === legMatch[1]);
+  if (legMatch && !leg) return send(res, 404, { error: 'That leg was already removed or moved.' });
+  const canManageLeg = leg && (group.locked
+    ? isGroupEditor(group, me.id)
+    : leg.addedBy === me.id || isLeader);
+  const legDenied = (verb) => (group.locked ? LOCKED_MSG : `Only the person who added this leg or the group leader can ${verb} it.`);
+
+  // Remove one leg
+  if (leg && !legMatch[2] && req.method === 'DELETE') {
+    if (!canManageLeg) return send(res, 403, { error: legDenied('remove') });
+    slip.legs = slip.legs.filter((l) => l.id !== leg.id);
     save();
+    notifyGroup(group.id, 'legs');
     return send(res, 200, { ok: true });
+  }
+
+  // Move one leg to another slip
+  if (leg && legMatch[2] && req.method === 'POST') {
+    if (!canManageLeg) return send(res, 403, { error: legDenied('move') });
+    const { toSlipId } = await readBody(req);
+    const target = group.slips.find((s) => s.id === toSlipId);
+    if (!target) return send(res, 404, { error: "That slip doesn't exist anymore." });
+    if (target.id === slip.id) return send(res, 400, { error: `It's already on ${slip.name}.` });
+    if (target.legs.some((l) => l.eventId === leg.eventId && l.market === leg.market && l.key === leg.key)) {
+      return send(res, 409, { error: `${target.name} already has that leg.` });
+    }
+    slip.legs = slip.legs.filter((l) => l.id !== leg.id);
+    target.legs.push(leg);
+    save();
+    notifyGroup(group.id, 'legs');
+    return send(res, 200, { ok: true, to: target.name });
   }
 
   return send(res, 404, { error: 'Not found' });
 }
 
-// Re-price every leg from FanDuel. One API call per unique game+market (cached).
+// Re-price every leg on every slip from FanDuel. One API call per unique game+market (cached),
+// so the same prop on three slips still costs one call.
 async function refreshLegOdds(group) {
   const groups = new Map();
-  for (const leg of group.legs) {
+  for (const leg of group.slips.flatMap((s) => s.legs)) {
     const k = `${leg.sport}|${leg.eventId}|${leg.market}`;
     if (!groups.has(k)) groups.set(k, []);
     groups.get(k).push(leg);
@@ -785,7 +1132,10 @@ async function refreshLegOdds(group) {
       Object.assign(leg, { price: o.price, link: o.link, sid: o.sid, marketSid: o.marketSid, unavailable: false, oddsAt: new Date().toISOString() });
     }
   }));
-  if (changed) save();
+  if (changed) {
+    save();
+    notifyGroup(group.id, 'odds');
+  }
 }
 
 http.createServer(async (req, res) => {
@@ -850,6 +1200,69 @@ function seeded(str) {
   return ((h >>> 0) % 1000) / 1000;
 }
 
+// Demo lines for the extra markets (First TD, alt spreads, team totals, 1H, F5, NRFI...), shaped like real data.
+function demoExtraMarket(g, market, players) {
+  const long = (who, lo, hi) => am(Math.round((lo + seeded(who + market) * (hi - lo)) / 10) * 10);
+  // Turn a smooth "edge" number into valid American odds (nothing between -100 and +100).
+  const am = (v) => Math.round(v >= 0 ? 100 + v : -100 + v);
+  const juice = (x) => Math.round(-125 + seeded(x + market) * 20); // -125 to -105
+  const fullGame = g.id.includes('mlb') ? 8 : g.id.includes('wnba') ? 160 : 46; // runs / points
+  const scale = market.includes('_q1') || market.endsWith('_p1') ? 0.25
+    : market.includes('_h1') || market.includes('_1st_5_') ? 0.5 : 1;
+  const total = market.includes('_1st_1_innings') ? 0.5 : Math.round(fullGame * scale) + 0.5;
+  if (/_1st_td|_last_td|first_basket|goal_scorer_first|first_home_run/.test(market)) {
+    return players.map((p) => ({ name: 'Yes', description: p, price: long(p, 550, 1800) }));
+  }
+  if (/double_double|triple_double/.test(market)) {
+    return players.map((p) => ({ name: 'Yes', description: p, price: market.includes('triple') ? long(p, 800, 3000) : long(p, -150, 400) }));
+  }
+  if (market === 'player_tds_over') {
+    return players.map((p) => ({ name: 'Over', description: p, point: 1.5, price: long(p, 400, 1200) }));
+  }
+  if (market.startsWith('player_') || market.startsWith('batter_') || market.startsWith('pitcher_')) {
+    return players.flatMap((p) => {
+      const line = Math.round(5 + seeded(p + market) * 60) + 0.5;
+      return [{ name: 'Over', description: p, point: line, price: juice(p) }, { name: 'Under', description: p, point: line, price: juice(p + 'u') }];
+    });
+  }
+  if (market.startsWith('alternate_team_totals') || market.startsWith('team_totals')) {
+    const alt = market.startsWith('alternate');
+    return [g.away, g.home].flatMap((team, i) => {
+      const base = Math.round((total / 2) + (i ? 1 : -1) * total * 0.03) + 0.5;
+      const spreadOut = Math.max(1, Math.round(total * 0.08));
+      const lines = alt ? [base - 2 * spreadOut, base - spreadOut, base + spreadOut, base + 2 * spreadOut] : [base];
+      return lines.flatMap((pt) => [
+        { name: 'Over', description: team, point: pt, price: alt ? am((pt - base) / spreadOut * 90 - 10) : juice(team) },
+        { name: 'Under', description: team, point: pt, price: alt ? am((base - pt) / spreadOut * 90 - 10) : juice(team + 'u') },
+      ]);
+    });
+  }
+  if (market.startsWith('alternate_spreads')) {
+    // Laying more points pays more: -13.5 is plus money, +13.5 is a heavy favorite.
+    const step = g.id.includes('mlb') ? 0.25 : 1;
+    return [-13.5, -9.5, -6.5, -2.5, 2.5, 6.5, 9.5, 13.5].flatMap((pt) => [
+      { name: g.home, point: Math.round(pt * step * 2) / 2 || 0.5, price: am(-pt * 25 - 10) },
+      { name: g.away, point: -(Math.round(pt * step * 2) / 2 || 0.5), price: am(pt * 25 - 10) },
+    ]);
+  }
+  if (market.startsWith('alternate_totals')) {
+    const step = g.id.includes('mlb') ? 0.2 : scale;
+    return [-10, -6, -3, 3, 6, 10].map((d) => Math.round(total + d * step) + 0.5).flatMap((pt) => [
+      { name: 'Over', point: pt, price: am((pt - total) / step * 22 - 10) },
+      { name: 'Under', point: pt, price: am((total - pt) / step * 22 - 10) },
+    ]);
+  }
+  if (market.startsWith('h2h')) return [{ name: g.away, price: 130 }, { name: g.home, price: -155 }];
+  if (market.startsWith('spreads')) {
+    const pt = Math.max(0.5, Math.round(3 * scale) + 0.5);
+    return [{ name: g.away, point: pt, price: -110 }, { name: g.home, point: -pt, price: -110 }];
+  }
+  if (market.startsWith('totals')) {
+    return [{ name: 'Over', point: total, price: juice('o') }, { name: 'Under', point: total, price: juice('u') }];
+  }
+  return [];
+}
+
 function demoOdds(sport, eventId, market) {
   const g = (DEMO_GAMES[sport] || []).find((x) => x.id === eventId);
   if (!g) throw Object.assign(new Error('Game not found.'), { status: 404 });
@@ -901,6 +1314,7 @@ function demoOdds(sport, eventId, market) {
     case 'spreads': outcomes = [{ name: g.away, point: 2.5, price: -110 }, { name: g.home, point: -2.5, price: -110 }]; break;
     case 'totals': outcomes = [{ name: 'Over', point: 46.5, price: -108 }, { name: 'Under', point: 46.5, price: -112 }]; break;
   }
+  if (!outcomes.length) outcomes = demoExtraMarket(g, market, Object.values(P).flat());
   return {
     id: g.id, home_team: g.home, away_team: g.away, commence_time: ev.commence,
     bookmakers: [{ key: 'fanduel', markets: [{ key: market, last_update: new Date().toISOString(), outcomes }] }],

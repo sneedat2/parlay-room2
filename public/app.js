@@ -5,7 +5,10 @@ const state = {
   groups: [],
   groupId: store('pr_group'),
   group: null,
-  legs: [],
+  slips: [],        // this group's named slips, each with its own legs
+  slipData: null,   // last /slips response (quota, demo flag, time)
+  slipId: null,     // slip on screen
+  addSlipId: null,  // slip that Find props adds to
   seenLegIds: new Set(),
   sports: [],
   sport: store('pr_sport'),
@@ -16,6 +19,7 @@ const state = {
   createNeedsCode: false,
   sportsbooks: [],
 };
+let pendingSlipId = null; // slip to open next, from a tapped notification
 
 function store(k, v) {
   try {
@@ -265,6 +269,12 @@ $('#add-email-form').addEventListener('submit', async (e) => {
 });
 
 $('#groups-logout').addEventListener('click', async () => {
+  // Stop this device getting alerts for an account that's no longer signed in here.
+  const sub = await currentSubscription();
+  if (sub) {
+    try { await api('/api/push/unsubscribe', { method: 'POST', body: { endpoint: sub.endpoint } }); } catch { /* ignore */ }
+    try { await sub.unsubscribe(); } catch { /* ignore */ }
+  }
   try { await api('/api/logout', { method: 'POST' }); } catch { /* ignore */ }
   signOutLocal();
 });
@@ -274,6 +284,7 @@ function signOutLocal() {
   store('pr_token', null);
   store('pr_group', null);
   clearInterval(poll);
+  disconnectLive();
   showAuth('signin');
 }
 
@@ -292,6 +303,7 @@ async function loadMe() {
 
 function showGroups() {
   clearInterval(poll);
+  disconnectLive();
   $('#groups-me').textContent = state.me.name;
   $('#create-code-wrap').hidden = !state.createNeedsCode;
   const list = $('#group-list');
@@ -340,7 +352,12 @@ function openGroup(id, showInvite = false) {
   if (!g) return showGroups();
   state.groupId = id;
   state.group = g;
-  state.legs = [];
+  state.slips = [];
+  state.slipData = null;
+  state.slipId = pendingSlipId || store(`pr_slip_${id}`);
+  state.addSlipId = state.slipId;
+  pendingSlipId = null;
+  resetSlipForms();
   state.seenLegIds = new Set();
   state.confirmKick = null;
   $('#code-form').hidden = true;
@@ -354,9 +371,29 @@ function openGroup(id, showInvite = false) {
   else if (state.props) renderOutcomes();
   clearInterval(poll);
   poll = setInterval(() => { if (!document.hidden) loadLegs(false); }, 20000);
+  connectLive();
+  renderNotify();
 }
 
 const amLeader = () => !!(state.group && state.me && state.group.leaderId === state.me.id);
+// Same rules as the server: locked groups are edited only by the leader and chosen editors.
+const amEditor = () => amLeader() || !!state.group?.members.find((m) => m.id === state.me?.id)?.isEditor;
+const canEditGroup = () => !!state.group && (!state.group.locked || amEditor());
+
+// View-only members in a locked group: no Find props, no slip controls, a short explanation.
+function applyEditAccess() {
+  const edit = canEditGroup();
+  const findTab = document.querySelector('.tab[data-tab="find"]');
+  findTab.hidden = !edit;
+  $('#panel-find').hidden = !edit;
+  document.querySelector('.panels').classList.toggle('single', !edit);
+  if (!edit && findTab.getAttribute('aria-selected') === 'true') showTab('slip');
+  $('#new-slip').hidden = !edit || !$('#new-slip-form').hidden;
+  if (!edit) $('#new-slip-form').hidden = true;
+  const leader = state.group.members.find((m) => m.isLeader)?.name || 'The leader';
+  $('#view-only').hidden = edit;
+  $('#view-only').textContent = `View only: ${leader} has locked this group. You can see every slip and place bets, but only editors can add or change props.`;
+}
 
 function renderGroupHeader() {
   const g = state.group;
@@ -373,8 +410,18 @@ function renderGroupHeader() {
   bookSel.title = amLeader() ? '' : 'Only the group leader can change this';
   $('#member-count').textContent = `${g.members.length} member${g.members.length === 1 ? '' : 's'}`;
 
+  // Lock switch (leader) / lock status (everyone)
+  const editors = g.members.filter((m) => m.isEditor).length;
+  $('#lock-status').textContent = g.locked
+    ? `Locked: only the leader${editors ? ` and ${editors} editor${editors === 1 ? '' : 's'}` : ''} can add or change props. Everyone can still place bets.`
+    : 'Open: anyone in the group can add props.';
+  $('#lock-toggle').hidden = !amLeader();
+  $('#lock-toggle').textContent = g.locked ? 'Unlock group' : 'Lock group';
+  applyEditAccess();
+
   $('#members').replaceChildren(...g.members.map((m) => {
     let right = null;
+    const editorPill = m.isEditor ? el('span', { class: 'pill editor' }, 'Editor') : null;
     if (m.isLeader) right = el('span', { class: 'pill leader' }, 'Leader');
     else if (amLeader() && state.confirmKick === m.id) {
       right = el('span', { class: 'member-actions' },
@@ -383,8 +430,14 @@ function renderGroupHeader() {
         el('button', { class: 'btn ghost sm', type: 'button', onclick: () => { state.confirmKick = null; renderGroupHeader(); } }, 'Cancel'));
     } else if (amLeader()) {
       right = el('span', { class: 'member-actions' },
+        el('button', {
+          class: `btn sm ${m.isEditor ? 'primary' : 'ghost'}`, type: 'button', 'aria-pressed': String(m.isEditor),
+          onclick: () => setEditor(m, !m.isEditor),
+        }, m.isEditor ? 'Editor ✓' : 'Make editor'),
         el('button', { class: 'link-btn', type: 'button', onclick: () => makeLeader(m) }, 'Make leader'),
         el('button', { class: 'link-btn danger-link', type: 'button', onclick: () => { state.confirmKick = m.id; renderGroupHeader(); } }, 'Remove'));
+    } else {
+      right = editorPill;
     }
     return el('li', { class: 'member' },
       el('span', {}, m.name, m.id === state.me.id ? el('span', { class: 'muted' }, ' (you)') : null), right);
@@ -396,6 +449,30 @@ function renderGroupHeader() {
     el('span', { class: 'muted' }, m.name),
     el('button', { class: 'link-btn', type: 'button', onclick: () => unban(m) }, 'Let back in'))));
 }
+
+async function setEditor(m, editor) {
+  try {
+    const { group } = await groupApi('/editors', { method: 'POST', body: { memberId: m.id, editor } });
+    state.group = group;
+    renderGroupHeader();
+    if (state.slipData) renderSlip();
+    toast(editor ? `${m.name} can now add and change props` : `${m.name} is view-only when the group is locked`);
+  } catch (ex) { toast(ex.message); }
+}
+
+$('#lock-toggle').addEventListener('click', async () => {
+  const locking = !state.group.locked;
+  try {
+    const { group } = await groupApi('/lock', { method: 'POST', body: { locked: locking } });
+    state.group = group;
+    renderGroupHeader();
+    if (state.slipData) renderSlip();
+    const editors = group.members.filter((m) => m.isEditor).length;
+    toast(locking
+      ? (editors ? 'Group locked. Only you and your editors can change props.' : 'Group locked. Tap "Make editor" next to anyone who should add props.')
+      : 'Group unlocked. Everyone can add props again.');
+  } catch (ex) { toast(ex.message); }
+});
 
 async function kick(m) {
   state.confirmKick = null;
@@ -511,6 +588,7 @@ function resetLeave() { $('#leave').hidden = false; $('#leave-confirm').hidden =
 
 document.querySelectorAll('.tab').forEach((t) => t.addEventListener('click', () => showTab(t.dataset.tab)));
 function showTab(name) {
+  if (name === 'find' && state.group && !canEditGroup()) name = 'slip';
   document.querySelectorAll('.tab').forEach((t) => t.setAttribute('aria-selected', String(t.dataset.tab === name)));
   document.querySelectorAll('.panel').forEach((p) => p.classList.toggle('active', p.dataset.panel === name));
   store('pr_tab', name);
@@ -518,34 +596,83 @@ function showTab(name) {
 
 // ---------------------------------------------------------------- slip
 
+let legsRequested = 0; // newest request sent
+let legsShown = 0;     // newest request drawn on screen
+
 async function loadLegs(fresh) {
   if (!state.groupId) return;
   const gid = state.groupId;
+  const seq = ++legsRequested;
   const btn = $('#refresh');
   if (fresh) { btn.disabled = true; btn.textContent = 'Refreshing…'; }
   try {
-    const data = await groupApi(`/legs${fresh ? '?fresh=1' : ''}`);
+    const data = await groupApi(`/slips${fresh ? '?fresh=1' : ''}`);
     if (gid !== state.groupId) return; // switched groups meanwhile
-    state.legs = data.legs;
+    if (seq < legsShown) return;       // a newer answer already arrived; don't roll the slip back
+    legsShown = seq;
+    state.slips = data.slips;
+    state.slipData = data;
+    // Keep looking at the same slip; if it was deleted, fall back to the first one.
+    if (!state.slips.some((s) => s.id === state.slipId)) setSlip(state.slips[0]?.id, false);
+    if (!state.slips.some((s) => s.id === state.addSlipId)) state.addSlipId = state.slipId;
     state.group = data.group;
     renderGroupHeader();
-    renderSlip(data);
+    renderSlip();
+    renderAddTo();
     if (state.props) renderOutcomes();
   } catch (ex) {
-    toast(ex.message);
-    if (/not in that group/.test(ex.message)) { await loadMe().catch(() => {}); showGroups(); }
+    if (/not in that group/.test(ex.message)) {
+      toast(ex.message);
+      await loadMe().catch(() => {});
+      showGroups();
+    } else if (fresh) {
+      toast(ex.message); // background checks stay quiet (e.g. phone briefly offline)
+    }
   } finally {
-    btn.disabled = false;
-    btn.textContent = 'Refresh odds';
+    if (fresh) {
+      btn.disabled = false;
+      btn.textContent = 'Refresh odds';
+    }
   }
 }
 
-function renderSlip(data) {
-  const legs = state.legs;
+const currentSlip = () => state.slips.find((s) => s.id === state.slipId) || state.slips[0];
+const canManageSlip = (s) => !!s && (state.group.locked ? amEditor() : s.createdBy === state.me.id || amLeader());
+const canManageLeg = (leg) => (state.group.locked ? amEditor() : leg.addedBy === state.me.id || amLeader());
+const memberName = (id) => [...state.group.members, ...state.group.removed].find((m) => m.id === id)?.name;
+
+// Which slip is on screen. Remembered per group so reopening the app lands on the same one.
+function setSlip(id, render = true) {
+  state.slipId = id;
+  state.addSlipId = id; // looking at a slip makes it where new props go
+  if (id && state.groupId) store(`pr_slip_${state.groupId}`, id);
+  resetSlipForms();
+  if (render && state.slipData) { renderSlip(); renderAddTo(); if (state.props) renderOutcomes(); }
+}
+
+function renderSlipTabs() {
+  $('#slip-tabs').replaceChildren(...state.slips.map((s) => el('button', {
+    class: 'slip-tab', type: 'button', role: 'tab', 'aria-selected': String(s.id === state.slipId),
+    onclick: () => setSlip(s.id),
+  }, el('span', { class: 'slip-tab-name' }, s.name), el('span', { class: 'slip-tab-count' }, String(s.legs.length)))));
+}
+
+function renderSlip() {
+  const data = state.slipData;
+  const slip = currentSlip();
+  if (!slip) return;
+  state.slipId = slip.id;
+  const legs = slip.legs;
   const live = legs.filter((l) => !l.unavailable);
   const byId = Object.fromEntries([...state.group.removed, ...state.group.members].map((m) => [m.id, m]));
   $('#demo-badge').hidden = !data.demo;
-  $('#tab-count').textContent = legs.length;
+  $('#tab-count').textContent = state.slips.length > 1 ? `${state.slips.length}` : legs.length;
+  renderSlipTabs();
+  $('#slip-name').textContent = slip.name;
+  $('#slip-by').textContent = `Made by ${memberName(slip.createdBy) || 'a former member'}`;
+  const manage = canManageSlip(slip);
+  $('#rename-slip').hidden = !manage || !$('#rename-slip-form').hidden;
+  const others = state.slips.filter((s) => s.id !== slip.id);
 
   if (live.length) {
     const dec = live.reduce((acc, l) => acc * toDecimal(l.price), 1);
@@ -557,18 +684,26 @@ function renderSlip(data) {
     $('#parlay-odds').textContent = '—';
     $('#parlay-sub').textContent = 'No legs yet';
   }
+  state.parlayDec = live.length ? live.reduce((acc, l) => acc * toDecimal(l.price), 1) : null;
+  renderBoost();
 
-  renderPlaceBet(data, live);
+  renderPlaceBet(slip, data, live);
 
   const list = $('#legs');
   list.replaceChildren();
   if (!legs.length) {
-    list.append(el('li', { class: 'empty' }, 'The slip is empty. Head to Find props and add the first leg.'));
+    list.append(el('li', { class: 'empty' }, `${slip.name} is empty. Head to Find props and add the first leg.`));
   }
   const firstRender = state.seenLegIds.size === 0;
   for (const leg of legs) {
     const who = byId[leg.addedBy];
-    const canRemove = leg.addedBy === state.me.id || amLeader();
+    const canRemove = canManageLeg(leg);
+    const moveTo = canRemove && others.length
+      ? el('select', {
+        class: 'move-select', 'aria-label': `Move ${leg.label} to another slip`,
+        onchange: (e) => { if (e.target.value) moveLeg(slip, leg, e.target.value); },
+      }, el('option', { value: '' }, 'Move to…'), others.map((s) => el('option', { value: s.id }, s.name)))
+      : null;
     const moved = leg.price === leg.priceAtAdd ? null
       : el('span', { class: `move ${toDecimal(leg.price) > toDecimal(leg.priceAtAdd) ? 'up' : 'down'}` }, `was ${fmtOdds(leg.priceAtAdd)}`);
     const isNew = !firstRender && !state.seenLegIds.has(leg.id);
@@ -587,15 +722,70 @@ function renderSlip(data) {
           leg.link && !leg.unavailable
             ? el('a', { class: 'btn primary sm', href: leg.link, target: '_blank', rel: 'noopener' }, 'Bet in FanDuel')
             : null,
-          canRemove ? el('button', { class: 'btn ghost sm', type: 'button', onclick: () => removeLeg(leg) }, 'Remove') : null))));
+          moveTo,
+          canRemove ? el('button', { class: 'btn ghost sm', type: 'button', onclick: () => removeLeg(slip, leg) }, 'Remove') : null))));
   }
 
   $('#updated').textContent = `Updated ${new Date(data.at).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}`;
   $('#quota').textContent = data.quota && data.quota.remaining != null ? `${data.quota.remaining} API credits left` : '';
-  if ($('#clear-confirm').hidden) $('#clear').hidden = !(amLeader() && legs.length);
+  const confirming = !$('#slip-confirm').hidden;
+  $('#clear').hidden = confirming || !(manage && legs.length);
+  $('#delete-slip').hidden = confirming || !(manage && state.slips.length > 1);
 }
 
-function renderPlaceBet(data, live) {
+// ---------------------------------------------------------------- profit boost calculator
+// A profit boost multiplies the winnings only: boosted decimal = 1 + (decimal - 1) * (1 + boost%).
+// Everything here runs on the viewer's phone; boost and stake are remembered per device.
+
+const money = (n) => `$${n.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+function boostPct() {
+  const v = Number(store('pr_boost'));
+  return v >= 10 && v <= 105 ? v : 25;
+}
+function boostStake() {
+  const v = Number(String($('#boost-stake').value).replace(/[$,\s]/g, ''));
+  return Number.isFinite(v) && v > 0 && v <= 1000000 ? v : null;
+}
+
+function renderBoost() {
+  const dec = state.parlayDec;
+  $('#boost').hidden = !dec;
+  if (!dec) return;
+  const pct = boostPct();
+  $('#boost-range').value = pct;
+  $('#boost-pct').textContent = `+${pct}%`;
+  document.querySelectorAll('.boost-chips .chip').forEach((c) => c.setAttribute('aria-pressed', String(Number(c.dataset.boost) === pct)));
+
+  const boosted = 1 + (dec - 1) * (1 + pct / 100);
+  $('#boost-odds').textContent = fmtOdds(toAmerican(boosted));
+  $('#boost-from').textContent = `from ${fmtOdds(toAmerican(dec))}`;
+
+  const stake = boostStake();
+  if (stake == null) {
+    $('#boost-pays').textContent = '—';
+    $('#boost-extra').textContent = 'Enter a stake';
+    return;
+  }
+  const normal = stake * dec;
+  const withBoost = stake * boosted;
+  $('#boost-pays').textContent = money(withBoost);
+  $('#boost-extra').textContent = `+${money(withBoost - normal)} vs ${money(normal)}`;
+}
+
+function setBoost(pct) {
+  store('pr_boost', String(pct));
+  renderBoost();
+}
+$('#boost-range').addEventListener('input', (e) => setBoost(Number(e.target.value)));
+document.querySelectorAll('.boost-chips .chip').forEach((c) => c.addEventListener('click', () => setBoost(Number(c.dataset.boost))));
+$('#boost-stake').addEventListener('input', () => {
+  const s = boostStake();
+  if (s != null) store('pr_stake', String(s));
+  renderBoost();
+});
+$('#boost-stake').value = store('pr_stake') || '10';
+
+function renderPlaceBet(slip, data, live) {
   const book = state.group.sportsbook.title;
   const btn = $('#place-bet');
   const note = $('#place-bet-note');
@@ -606,10 +796,10 @@ function renderPlaceBet(data, live) {
     note.hidden = true;
     return;
   }
-  btn.href = data.placeBet.url;
+  btn.href = slip.placeBet.url;
   btn.removeAttribute('aria-disabled');
   note.hidden = false;
-  if (data.placeBet.loadsSlip) {
+  if (slip.placeBet.loadsSlip) {
     note.textContent = `Opens ${book} with ${live.length === 1 ? 'this leg' : `all ${live.length} legs`} in your betslip.`;
   } else if (data.demo) {
     note.textContent = `Demo odds have no betslip links, so this opens ${book} and you add the legs yourself. Add an Odds API key to load them automatically.`;
@@ -622,23 +812,127 @@ $('#place-bet').addEventListener('click', (e) => {
   if (!$('#place-bet').getAttribute('href')) { e.preventDefault(); toast('Add a leg to the slip first'); }
 });
 
-async function removeLeg(leg) {
+async function removeLeg(slip, leg) {
   try {
-    await groupApi(`/legs/${leg.id}`, { method: 'DELETE' });
+    await groupApi(`/slips/${slip.id}/legs/${leg.id}`, { method: 'DELETE' });
     toast('Leg removed');
   } catch (ex) { toast(ex.message); }
   loadLegs(false);
 }
 
+async function moveLeg(slip, leg, toSlipId) {
+  try {
+    const { to } = await groupApi(`/slips/${slip.id}/legs/${leg.id}/move`, { method: 'POST', body: { toSlipId } });
+    toast(`Moved to ${to}`);
+  } catch (ex) { toast(ex.message); }
+  loadLegs(false);
+}
+
 $('#refresh').addEventListener('click', () => loadLegs(true));
-$('#clear').addEventListener('click', () => { $('#clear').hidden = true; $('#clear-confirm').hidden = false; });
-$('#clear-no').addEventListener('click', resetClear);
-$('#clear-yes').addEventListener('click', async () => {
-  try { await groupApi('/legs', { method: 'DELETE' }); toast('Slip cleared'); } catch (ex) { toast(ex.message); }
-  resetClear();
+
+// One inline "are you sure?" row, shared by Clear slip and Delete slip.
+let confirmAction = null;
+function askConfirm(text, yesLabel, action) {
+  confirmAction = action;
+  $('#slip-confirm-text').textContent = text;
+  $('#slip-confirm-yes').textContent = yesLabel;
+  $('#slip-confirm').hidden = false;
+  $('#clear').hidden = true;
+  $('#delete-slip').hidden = true;
+}
+function closeConfirm() {
+  confirmAction = null;
+  $('#slip-confirm').hidden = true;
+  if (state.slipData) renderSlip();
+}
+$('#slip-confirm-no').addEventListener('click', closeConfirm);
+$('#slip-confirm-yes').addEventListener('click', async () => {
+  const action = confirmAction;
+  closeConfirm();
+  if (action) await action();
   loadLegs(false);
 });
-function resetClear() { $('#clear').hidden = false; $('#clear-confirm').hidden = true; }
+
+$('#clear').addEventListener('click', () => {
+  const slip = currentSlip();
+  askConfirm(`Remove every leg from ${slip.name}?`, 'Yes, clear', async () => {
+    try { await groupApi(`/slips/${slip.id}/legs`, { method: 'DELETE' }); toast(`${slip.name} cleared`); } catch (ex) { toast(ex.message); }
+  });
+});
+
+$('#delete-slip').addEventListener('click', () => {
+  const slip = currentSlip();
+  const n = slip.legs.length;
+  askConfirm(`Delete ${slip.name}${n ? ` and its ${n} leg${n === 1 ? '' : 's'}` : ''}?`, 'Yes, delete', async () => {
+    try {
+      await groupApi(`/slips/${slip.id}`, { method: 'DELETE' });
+      toast(`${slip.name} deleted`);
+      setSlip(state.slips.find((s) => s.id !== slip.id)?.id, false);
+    } catch (ex) { toast(ex.message); }
+  });
+});
+
+// New slip
+function resetSlipForms() {
+  for (const f of ['new-slip', 'rename-slip']) {
+    $(`#${f}-form`).hidden = true;
+    showError(`#${f}-error`);
+  }
+  $('#new-slip').hidden = !canEditGroup();
+  if (!$('#slip-confirm').hidden) { confirmAction = null; $('#slip-confirm').hidden = true; }
+}
+$('#new-slip').addEventListener('click', () => {
+  resetSlipForms();
+  $('#new-slip-form').hidden = false;
+  $('#new-slip').hidden = true;
+  $('#new-slip-name').value = '';
+  $('#new-slip-name').focus();
+});
+$('#new-slip-cancel').addEventListener('click', resetSlipForms);
+$('#new-slip-form').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  showError('#new-slip-error');
+  try {
+    const { slip } = await groupApi('/slips', { method: 'POST', body: { name: $('#new-slip-name').value } });
+    state.addSlipId = slip.id; // new slip is where the next props go
+    resetSlipForms();
+    state.slipId = slip.id;
+    store(`pr_slip_${state.groupId}`, slip.id);
+    toast(`${slip.name} created. Props you add now go here.`);
+    loadLegs(false);
+  } catch (ex) { showError('#new-slip-error', ex.message); }
+});
+
+// Rename
+$('#rename-slip').addEventListener('click', () => {
+  resetSlipForms();
+  $('#rename-slip-form').hidden = false;
+  $('#rename-slip').hidden = true;
+  $('#rename-slip-name').value = currentSlip().name;
+  $('#rename-slip-name').select();
+});
+$('#rename-slip-cancel').addEventListener('click', () => { resetSlipForms(); renderSlip(); });
+$('#rename-slip-form').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  showError('#rename-slip-error');
+  try {
+    const { slip } = await groupApi(`/slips/${currentSlip().id}`, { method: 'PATCH', body: { name: $('#rename-slip-name').value } });
+    resetSlipForms();
+    toast(`Renamed to ${slip.name}`);
+    loadLegs(false);
+  } catch (ex) { showError('#rename-slip-error', ex.message); }
+});
+
+// Finder: which slip new props go on. Follows the slip you're looking at unless you pick another.
+function renderAddTo() {
+  const sel = $('#add-to-slip');
+  sel.replaceChildren(...state.slips.map((s) => el('option', { value: s.id }, `${s.name} (${s.legs.length})`)));
+  sel.value = state.addSlipId || state.slipId;
+}
+$('#add-to-slip').addEventListener('change', (e) => {
+  state.addSlipId = e.target.value;
+  if (state.props) renderOutcomes();
+});
 
 // ---------------------------------------------------------------- finder
 
@@ -687,10 +981,32 @@ async function selectSport(key) {
 const sportMarkets = () => state.sports.find((s) => s.key === state.sport)?.markets || [];
 
 function renderMarkets() {
-  $('#markets').replaceChildren(...sportMarkets().map((m) => el('button', {
-    class: 'chip', type: 'button', role: 'tab', 'aria-selected': String(m.key === state.market),
-    onclick: () => { state.market = m.key; renderMarkets(); loadProps(); },
-  }, m.label)));
+  for (const group of ['player', 'game']) {
+    const chips = sportMarkets().filter((m) => m.group === group).map((m) => el('button', {
+      class: 'chip', type: 'button', role: 'tab', 'aria-selected': String(m.key === state.market),
+      onclick: () => { state.market = m.key; renderMarkets(); loadProps(); },
+    }, m.label));
+    const row = $(`#markets-${group}`);
+    row.replaceChildren(...chips);
+    row.parentElement.hidden = !chips.length;
+  }
+  // Keep the picked chip in view when the row scrolls sideways.
+  document.querySelector('.market-row .chip[aria-selected="true"]')?.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+}
+
+// How lines are grouped in the list: by player (props, team totals), by team (spreads),
+// by line (totals, so Over and Under sit side by side), or one row (moneylines).
+function outcomeGroup(p, o) {
+  if (o.player) return o.player;
+  if (p.market.includes('spreads')) return o.side;
+  if (p.market.includes('totals')) return `Total ${o.point}`;
+  return p.marketLabel;
+}
+function outcomeSide(p, o) {
+  if (o.player) return `${o.side}${o.point != null ? ` ${o.point}` : ''}`;
+  if (p.market.includes('spreads')) return `${o.point > 0 ? '+' : ''}${o.point}`;
+  if (p.market.includes('totals')) return o.side;
+  return o.label;
 }
 
 $('#event-select').addEventListener('change', (e) => { state.event = e.target.value; loadProps(); });
@@ -715,12 +1031,14 @@ function renderOutcomes() {
   const p = state.props;
   if (!p) return;
   const q = $('#search').value.trim().toLowerCase();
-  const onSlip = new Set(state.legs.filter((l) => l.eventId === p.event.id && l.market === p.market).map((l) => l.key));
+  // "Added" checkmarks are for the slip props are going to.
+  const target = state.slips.find((s) => s.id === state.addSlipId) || currentSlip();
+  const onSlip = new Set((target?.legs || []).filter((l) => l.eventId === p.event.id && l.market === p.market).map((l) => l.key));
   const rows = p.outcomes.filter((o) => !q || o.label.toLowerCase().includes(q));
 
   const groups = new Map();
   for (const o of rows) {
-    const g = o.player || p.marketLabel;
+    const g = outcomeGroup(p, o);
     if (!groups.has(g)) groups.set(g, []);
     groups.get(g).push(o);
   }
@@ -733,7 +1051,7 @@ function renderOutcomes() {
     el('div', { class: 'player-name' }, name),
     el('div', { class: 'options' }, outs.map((o) => {
       const added = onSlip.has(o.key);
-      const sideText = o.player ? `${o.side}${o.point != null ? ` ${o.point}` : ''}` : o.label;
+      const sideText = outcomeSide(p, o);
       return el('button', {
         class: `option${added ? ' added' : ''}`, type: 'button', disabled: added,
         'aria-label': `${added ? 'On slip: ' : 'Add '}${o.label} ${fmtOdds(o.price)}`,
@@ -744,11 +1062,210 @@ function renderOutcomes() {
 
 async function addLeg(o) {
   const p = state.props;
+  const target = state.slips.find((s) => s.id === state.addSlipId) || currentSlip();
+  if (!target) return toast('Make a slip first.');
   try {
-    await groupApi('/legs', { method: 'POST', body: { sport: p.sport, eventId: p.event.id, market: p.market, key: o.key } });
-    toast(`Added ${o.label}`);
+    await groupApi(`/slips/${target.id}/legs`, { method: 'POST', body: { sport: p.sport, eventId: p.event.id, market: p.market, key: o.key } });
+    toast(`Added ${o.label} to ${target.name}`);
   } catch (ex) { toast(ex.message); }
   loadLegs(false);
+}
+
+// ---------------------------------------------------------------- notifications (web push)
+
+const isIOS = /iPhone|iPad|iPod/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+const isInstalled = matchMedia('(display-mode: standalone)').matches || navigator.standalone === true;
+const pushSupported = 'serviceWorker' in navigator && 'PushManager' in window && 'Notification' in window;
+let swReg = null;
+
+async function registerServiceWorker() {
+  if (!('serviceWorker' in navigator)) return;
+  try { swReg = await navigator.serviceWorker.register('/sw.js'); } catch { swReg = null; }
+}
+
+function keyBytes(b64url) {
+  const b64 = (b64url + '='.repeat((4 - (b64url.length % 4)) % 4)).replace(/-/g, '+').replace(/_/g, '/');
+  return Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
+}
+const sameBytes = (a, b) => a && b && a.length === b.length && a.every((v, i) => v === b[i]);
+
+async function currentSubscription() {
+  if (!swReg || !pushSupported) return null;
+  try { return await swReg.pushManager.getSubscription(); } catch { return null; }
+}
+
+// 'on' | 'off' | 'blocked' | 'ios-install' (iPhone, not on Home Screen yet) | 'unsupported'
+async function notifyState() {
+  if (!pushSupported) return isIOS && !isInstalled ? 'ios-install' : 'unsupported';
+  if (Notification.permission === 'denied') return 'blocked';
+  const sub = await currentSubscription();
+  return sub && Notification.permission === 'granted' ? 'on' : 'off';
+}
+
+// Subscribe this device (or fix a subscription made with an old server key) and tell the server.
+async function ensureSubscription() {
+  const { publicKey } = await api('/api/push/key');
+  if (!publicKey) throw new Error("Notifications aren't available on this server yet.");
+  if (!swReg) await registerServiceWorker();
+  if (!swReg) throw new Error("This browser can't do notifications.");
+  await navigator.serviceWorker.ready;
+  const want = keyBytes(publicKey);
+  let sub = await swReg.pushManager.getSubscription();
+  if (sub && !sameBytes(new Uint8Array(sub.options.applicationServerKey || []), want)) {
+    await sub.unsubscribe();
+    sub = null;
+  }
+  if (!sub) sub = await swReg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: want });
+  await api('/api/push/subscribe', { method: 'POST', body: { subscription: sub.toJSON() } });
+}
+
+async function turnOnNotifications() {
+  try {
+    const perm = await Notification.requestPermission();
+    if (perm !== 'granted') {
+      toast(perm === 'denied'
+        ? 'Notifications are blocked. Allow them for this site in your browser or phone settings.'
+        : 'Notifications stay off. You can turn them on any time here.');
+      return renderNotify();
+    }
+    await ensureSubscription();
+    store('pr_notify_dismissed', null);
+    toast("Notifications on. You'll get a ping when someone adds a leg.");
+  } catch (ex) {
+    toast(ex.message || "Couldn't turn on notifications. Try again.");
+  }
+  renderNotify();
+}
+
+async function turnOffNotifications() {
+  const sub = await currentSubscription();
+  if (sub) {
+    try { await api('/api/push/unsubscribe', { method: 'POST', body: { endpoint: sub.endpoint } }); } catch { /* still unsubscribe locally */ }
+    try { await sub.unsubscribe(); } catch { /* ignore */ }
+  }
+  toast('Notifications off for this device');
+  renderNotify();
+}
+
+async function renderNotify() {
+  const s = await notifyState();
+  const status = {
+    on: 'On for this device.',
+    off: 'Off for this device.',
+    blocked: 'Blocked. Allow notifications for this site in your browser or phone settings.',
+    'ios-install': 'On iPhone, add the app to your Home Screen first.',
+    unsupported: "This browser can't show notifications.",
+  }[s];
+  $('#notify-status').textContent = status;
+  $('#notify-on').hidden = s !== 'off';
+  $('#notify-test').hidden = s !== 'on';
+  $('#notify-off').hidden = s !== 'on';
+  $('#ios-install').hidden = s !== 'ios-install';
+
+  // The friendly prompt above the slip, until they act on it or say "not now".
+  const dismissed = store('pr_notify_dismissed') === '1';
+  const showCard = !dismissed && (s === 'off' || s === 'ios-install');
+  $('#notify-card').hidden = !showCard;
+  $('#notify-card-sub').textContent = s === 'ios-install'
+    ? 'On iPhone, add Parlay Room to your Home Screen first.'
+    : 'Even when the app is closed.';
+  $('#notify-card-on').textContent = s === 'ios-install' ? 'Show me how' : 'Turn on';
+}
+
+$('#notify-on').addEventListener('click', turnOnNotifications);
+$('#notify-off').addEventListener('click', turnOffNotifications);
+$('#notify-test').addEventListener('click', async () => {
+  try { await api('/api/push/test', { method: 'POST' }); toast('Test sent. It should pop up in a few seconds.'); }
+  catch (ex) { toast(ex.message); }
+});
+$('#notify-card-on').addEventListener('click', async () => {
+  if ((await notifyState()) === 'ios-install') {
+    $('#group-info').open = true;
+    $('#ios-install').scrollIntoView({ behavior: 'smooth', block: 'center' });
+    return;
+  }
+  turnOnNotifications();
+});
+$('#notify-card-later').addEventListener('click', () => {
+  store('pr_notify_dismissed', '1');
+  $('#notify-card').hidden = true;
+});
+
+// Keep the server's copy of this device's subscription current (e.g. after the server's data was reset).
+async function resyncNotifications() {
+  if ((await notifyState()) !== 'on') return;
+  try { await ensureSubscription(); } catch { /* not critical */ }
+}
+
+// Tapping a notification opens the group it's about.
+// Notification links look like /?g=<group>&s=<slip>.
+function linkTarget(url) {
+  try {
+    const p = new URL(url, location.origin).searchParams;
+    return { gid: p.get('g'), sid: p.get('s') };
+  } catch { return {}; }
+}
+if ('serviceWorker' in navigator) {
+  navigator.serviceWorker.addEventListener('message', (e) => {
+    if (e.data?.type !== 'open') return;
+    const { gid, sid } = linkTarget(e.data.url);
+    if (gid && state.groups.some((g) => g.id === gid)) {
+      pendingSlipId = sid;
+      openGroup(gid);
+      showTab('slip');
+    } else if (state.groupId) loadLegs(false);
+  });
+}
+const fromLink = linkTarget(location.href);
+if (fromLink.gid) {
+  store('pr_group', fromLink.gid);
+  state.groupId = fromLink.gid;
+  pendingSlipId = fromLink.sid;
+  store('pr_tab', 'slip');
+  history.replaceState(null, '', '/');
+}
+
+// ---------------------------------------------------------------- live updates
+
+// The server pushes "changed" the moment anyone adds or removes a leg, so every screen reloads
+// right away. Phones drop the connection when locked or in another app; we reconnect and
+// catch up when the app is back in front. The 20-second poll is the backup.
+let live = null;
+let liveRetry = null;
+
+function setLive(on) { $('#live-status').hidden = !on; }
+
+function disconnectLive() {
+  clearTimeout(liveRetry);
+  if (live) { live.close(); live = null; }
+  setLive(false);
+}
+
+async function connectLive() {
+  disconnectLive();
+  const gid = state.groupId;
+  if (!gid || !window.EventSource || document.hidden) return;
+  let ticket;
+  try {
+    ({ ticket } = await groupApi('/live-ticket', { method: 'POST' }));
+  } catch {
+    liveRetry = setTimeout(connectLive, 10000);
+    return;
+  }
+  if (gid !== state.groupId || document.hidden) return;
+  const es = new EventSource(`/api/live?ticket=${encodeURIComponent(ticket)}`);
+  live = es;
+  es.onopen = () => { setLive(true); loadLegs(false); }; // catch up on anything missed while disconnected
+  es.addEventListener('changed', () => loadLegs(false));
+  es.onerror = () => {
+    // Tickets are one-time, so the browser's own retry can't reuse this one. Get a new one.
+    if (live !== es) return;
+    es.close();
+    live = null;
+    setLive(false);
+    clearTimeout(liveRetry);
+    liveRetry = setTimeout(() => { if (state.groupId === gid) connectLive(); }, 3000);
+  };
 }
 
 // ---------------------------------------------------------------- boot
@@ -763,12 +1280,24 @@ async function boot() {
   }
   if (state.me.needsPassword) return showScreen('set-password');
   if (!state.me.email) return showScreen('add-email');
+  resyncNotifications();
   if (store('pr_invite') && await acceptInvite()) return;
   if (state.groupId && state.groups.some((g) => g.id === state.groupId)) openGroup(state.groupId);
   else if (state.groups.length === 1) openGroup(state.groups[0].id);
   else showGroups();
 }
 
-document.addEventListener('visibilitychange', () => { if (!document.hidden && state.groupId && !$('#app').hidden) loadLegs(false); });
+document.addEventListener('visibilitychange', () => {
+  if (!state.groupId || $('#app').hidden) return;
+  if (document.hidden) return;
+  loadLegs(false);
+  if (!live) connectLive();
+});
+// Phones restoring the page from memory (back button, app switcher) don't always fire visibilitychange.
+window.addEventListener('pageshow', (e) => {
+  if (e.persisted && state.groupId && !$('#app').hidden) { loadLegs(false); connectLive(); }
+});
+window.addEventListener('online', () => { if (state.groupId && !$('#app').hidden) { loadLegs(false); connectLive(); } });
 
+registerServiceWorker();
 if (state.token) boot(); else showAuth(store('pr_invite') ? 'signup' : 'signin');
