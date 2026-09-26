@@ -735,13 +735,12 @@ function renderSlip() {
 
 // ---------------------------------------------------------------- profit boost calculator
 // A profit boost multiplies the winnings only: boosted decimal = 1 + (decimal - 1) * (1 + boost%).
-// Everything here runs on the viewer's phone; boost and stake are remembered per device.
+// Everything here runs on the viewer's phone. The boost starts at 0% every time the app opens
+// (so nobody mistakes a leftover boost for the real odds); the stake is remembered per device.
 
 const money = (n) => `$${n.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
-function boostPct() {
-  const v = Number(store('pr_boost'));
-  return v >= 10 && v <= 105 ? v : 25;
-}
+let boostSetting = 0;
+const boostPct = () => boostSetting;
 function boostStake() {
   const v = Number(String($('#boost-stake').value).replace(/[$,\s]/g, ''));
   return Number.isFinite(v) && v > 0 && v <= 1000000 ? v : null;
@@ -753,12 +752,12 @@ function renderBoost() {
   if (!dec) return;
   const pct = boostPct();
   $('#boost-range').value = pct;
-  $('#boost-pct').textContent = `+${pct}%`;
+  $('#boost-pct').textContent = pct ? `+${pct}%` : 'No boost';
   document.querySelectorAll('.boost-chips .chip').forEach((c) => c.setAttribute('aria-pressed', String(Number(c.dataset.boost) === pct)));
 
   const boosted = 1 + (dec - 1) * (1 + pct / 100);
   $('#boost-odds').textContent = fmtOdds(toAmerican(boosted));
-  $('#boost-from').textContent = `from ${fmtOdds(toAmerican(dec))}`;
+  $('#boost-from').textContent = pct ? `from ${fmtOdds(toAmerican(dec))}` : 'same as the slip';
 
   const stake = boostStake();
   if (stake == null) {
@@ -769,13 +768,14 @@ function renderBoost() {
   const normal = stake * dec;
   const withBoost = stake * boosted;
   $('#boost-pays').textContent = money(withBoost);
-  $('#boost-extra').textContent = `+${money(withBoost - normal)} vs ${money(normal)}`;
+  $('#boost-extra').textContent = pct ? `+${money(withBoost - normal)} vs ${money(normal)}` : 'Slide to try a boost';
 }
 
 function setBoost(pct) {
-  store('pr_boost', String(pct));
+  boostSetting = Math.min(105, Math.max(0, pct));
   renderBoost();
 }
+store('pr_boost', null); // older versions saved the boost; always start at 0 now
 $('#boost-range').addEventListener('input', (e) => setBoost(Number(e.target.value)));
 document.querySelectorAll('.boost-chips .chip').forEach((c) => c.addEventListener('click', () => setBoost(Number(c.dataset.boost))));
 $('#boost-stake').addEventListener('input', () => {

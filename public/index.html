@@ -237,10 +237,11 @@
           <div id="boost" class="boost" hidden>
             <div class="boost-head">
               <label for="boost-range" class="boost-label">Profit boost</label>
-              <span id="boost-pct" class="boost-pct">25%</span>
+              <span id="boost-pct" class="boost-pct">No boost</span>
             </div>
-            <input id="boost-range" type="range" min="10" max="105" step="5" value="25" aria-describedby="boost-note">
+            <input id="boost-range" type="range" min="0" max="105" step="5" value="0" aria-describedby="boost-note">
             <div class="boost-chips" role="group" aria-label="Common boosts">
+              <button class="chip sm" type="button" data-boost="0">None</button>
               <button class="chip sm" type="button" data-boost="25">25%</button>
               <button class="chip sm" type="button" data-boost="30">30%</button>
               <button class="chip sm" type="button" data-boost="50">50%</button>
