@@ -1169,8 +1169,24 @@ function loadEnvFile(file) {
 
 // ---------------------------------------------------------------- demo data (used when no API key)
 
-const demoSports = new Set(['americanfootball_nfl', 'basketball_wnba', 'baseball_mlb']);
+const demoSports = new Set(['americanfootball_nfl', 'americanfootball_ncaaf', 'basketball_wnba', 'baseball_mlb']);
+// A busy college Saturday (plus a couple of other days) to show the day tabs and team search.
+const cfb = (id, away, home, hours) => ({
+  id, away, home, hours,
+  players: { QB: [`${away.split(' ')[0]} QB`, `${home.split(' ')[0]} QB`], RB: [`${away.split(' ')[0]} RB`, `${home.split(' ')[0]} RB`], WR: [`${away.split(' ')[0]} WR1`, `${home.split(' ')[0]} WR1`, `${home.split(' ')[0]} WR2`] },
+});
 const DEMO_GAMES = {
+  americanfootball_ncaaf: [
+    cfb('demo-cfb-1', 'Clemson Tigers', 'Florida State Seminoles', 26),
+    cfb('demo-cfb-2', 'Ohio State Buckeyes', 'Michigan Wolverines', 28),
+    cfb('demo-cfb-3', 'Alabama Crimson Tide', 'LSU Tigers', 30),
+    cfb('demo-cfb-4', 'Oregon Ducks', 'USC Trojans', 31),
+    cfb('demo-cfb-5', 'Texas Longhorns', 'Oklahoma Sooners', 29),
+    cfb('demo-cfb-6', 'Georgia Bulldogs', 'Tennessee Volunteers', 32),
+    cfb('demo-cfb-7', 'Penn State Nittany Lions', 'Iowa Hawkeyes', 27),
+    cfb('demo-cfb-8', 'Notre Dame Fighting Irish', 'Miami Hurricanes', 50),
+    cfb('demo-cfb-9', 'Utah Utes', 'BYU Cougars', 3),
+  ],
   americanfootball_nfl: [
     { id: 'demo-nfl-1', away: 'Buffalo Bills', home: 'Miami Dolphins', hours: 50,
       players: { QB: ['Josh Allen', 'Tua Tagovailoa'], RB: ['James Cook', "De'Von Achane"], WR: ['Khalil Shakir', 'Tyreek Hill', 'Jaylen Waddle'] } },

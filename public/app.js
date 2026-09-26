@@ -960,21 +960,130 @@ async function selectSport(key) {
   renderMarkets();
   $('#find-status').textContent = 'Loading games…';
   $('#outcomes').replaceChildren();
+  state.props = null;
+  state.event = null;
+  $('#game-picker').replaceChildren();
   try {
     const { events } = await api(`/api/events?sport=${key}`);
-    state.events = events;
-    const sel = $('#event-select');
-    sel.replaceChildren(...events.map((e) => el('option', { value: e.id }, `${e.away} @ ${e.home} — ${fmtTime(e.commence)}`)));
+    if (state.sport !== key) return; // switched sports while loading
+    state.events = [...events].sort((a, b) => a.commence.localeCompare(b.commence));
     if (!events.length) {
-      state.event = null;
-      state.props = null;
       $('#find-status').textContent = 'No upcoming games on FanDuel for this sport.';
+      renderGamePicker();
       return;
     }
-    state.event = events[0].id;
-    loadProps();
+    // Reopen the game you last picked for this sport; otherwise start on the first day with games.
+    const last = store(`pr_game_${key}`);
+    const lastGame = state.events.find((e) => e.id === last);
+    state.gameDay = lastGame ? dayKey(lastGame.commence) : dayKey(state.events[0].commence);
+    state.gameFilter = '';
+    if (lastGame) {
+      state.event = lastGame.id;
+      state.pickerOpen = false;
+      renderGamePicker();
+      loadProps();
+    } else {
+      state.pickerOpen = true;
+      renderGamePicker();
+      $('#find-status').textContent = 'Pick a game to see its odds.';
+    }
   } catch (ex) {
     $('#find-status').textContent = ex.message;
+  }
+}
+
+// ---------------------------------------------------------------- game picker
+// Games split by day (in the viewer's own time zone), shown as cards with team badges.
+// Once a game is picked, the list folds into one bar so the props sit right below it.
+
+const dayKey = (iso) => {
+  const d = new Date(iso);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+};
+function dayLabel(key) {
+  const [y, m, d] = key.split('-').map(Number);
+  const day = new Date(y, m - 1, d);
+  const today = new Date(); today.setHours(0, 0, 0, 0);
+  const diff = Math.round((day - today) / 864e5);
+  if (diff === 0) return 'Today';
+  if (diff === 1) return 'Tomorrow';
+  if (diff === -1) return 'Yesterday';
+  return day.toLocaleDateString([], { weekday: 'short', month: 'numeric', day: 'numeric' });
+}
+const gameTime = (iso) => (new Date(iso) <= new Date()
+  ? 'Started'
+  : new Date(iso).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }));
+
+function teamLine(name) {
+  return el('span', { class: 'team-line' }, teamBadge(name), el('span', { class: 'team-name' }, name));
+}
+
+function pickGame(e) {
+  state.event = e.id;
+  state.pickerOpen = false;
+  store(`pr_game_${state.sport}`, e.id);
+  renderGamePicker();
+  loadProps();
+}
+
+function renderGamePicker() {
+  const box = $('#game-picker');
+  const events = state.events || [];
+  if (!events.length) { box.replaceChildren(); return; }
+  const picked = events.find((e) => e.id === state.event);
+
+  // Folded: just the chosen game and a way back to the list.
+  if (picked && !state.pickerOpen) {
+    box.replaceChildren(el('div', { class: 'game-chosen' },
+      el('div', { class: 'game-chosen-teams' },
+        el('span', { class: 'game-chosen-when' }, `${dayLabel(dayKey(picked.commence))} · ${gameTime(picked.commence)}`),
+        teamLine(picked.away), teamLine(picked.home)),
+      el('button', { class: 'btn ghost sm', type: 'button', onclick: () => { state.pickerOpen = true; renderGamePicker(); } }, 'Change game')));
+    return;
+  }
+
+  // Open: day tabs, optional team search, then that day's games.
+  const days = [...new Set(events.map((e) => dayKey(e.commence)))];
+  if (!days.includes(state.gameDay)) state.gameDay = days[0];
+  const counts = Object.fromEntries(days.map((d) => [d, events.filter((e) => dayKey(e.commence) === d).length]));
+  const dayTabs = el('div', { class: 'day-tabs chips scroll', role: 'tablist', 'aria-label': 'Game day' },
+    days.map((d) => el('button', {
+      class: 'chip day-chip', type: 'button', role: 'tab', 'aria-selected': String(d === state.gameDay),
+      onclick: () => { state.gameDay = d; state.gameFilter = ''; renderGamePicker(); },
+    }, dayLabel(d), el('span', { class: 'day-count' }, String(counts[d])))));
+
+  const q = (state.gameFilter || '').trim().toLowerCase();
+  const dayGames = events.filter((e) => dayKey(e.commence) === state.gameDay);
+  const shown = dayGames.filter((e) => !q || `${e.away} ${e.home}`.toLowerCase().includes(q));
+  const search = dayGames.length > 6
+    ? el('input', {
+      id: 'game-filter', type: 'search', class: 'game-filter', placeholder: 'Find a team', 'aria-label': 'Find a team',
+      value: state.gameFilter || '',
+      oninput: (ev) => { state.gameFilter = ev.target.value; renderGameList(); },
+    })
+    : null;
+
+  const list = el('ul', { class: 'game-list', id: 'game-list' });
+  box.replaceChildren(...[
+    el('div', { class: 'game-picker-head' },
+      el('span', { class: 'row-label' }, 'Games'),
+      picked ? el('button', { class: 'link-btn', type: 'button', onclick: () => { state.pickerOpen = false; renderGamePicker(); } }, 'Back to my game') : null),
+    dayTabs, search, list].filter(Boolean));
+  renderGameList(shown);
+  document.querySelector('.day-chip[aria-selected="true"]')?.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+
+  function renderGameList(games) {
+    const qq = (state.gameFilter || '').trim().toLowerCase();
+    const rows = games || dayGames.filter((e) => !qq || `${e.away} ${e.home}`.toLowerCase().includes(qq));
+    list.replaceChildren(...(rows.length ? rows.map((e) => el('li', {},
+      el('button', {
+        class: `game-card${e.id === state.event ? ' selected' : ''}`, type: 'button',
+        'aria-label': `${e.away} at ${e.home}, ${dayLabel(dayKey(e.commence))} ${gameTime(e.commence)}`,
+        onclick: () => pickGame(e),
+      },
+      el('span', { class: 'game-teams' }, teamLine(e.away), teamLine(e.home)),
+      el('span', { class: `game-time${new Date(e.commence) <= new Date() ? ' started' : ''}` }, gameTime(e.commence)))))
+      : [el('li', { class: 'empty small' }, 'No games match that team.')]));
   }
 }
 
@@ -1009,7 +1118,6 @@ function outcomeSide(p, o) {
   return o.label;
 }
 
-$('#event-select').addEventListener('change', (e) => { state.event = e.target.value; loadProps(); });
 $('#search').addEventListener('input', () => renderOutcomes());
 
 async function loadProps() {
@@ -1048,7 +1156,9 @@ function renderOutcomes() {
     : `${rows.length} line${rows.length === 1 ? '' : 's'} · ${p.marketLabel}${p.lastUpdate ? ` · odds as of ${new Date(p.lastUpdate).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}` : ''}`;
 
   $('#outcomes').replaceChildren(...[...groups].map(([name, outs]) => el('li', { class: 'player-group' },
-    el('div', { class: 'player-name' }, name),
+    [p.event.home, p.event.away].includes(name)
+      ? el('div', { class: 'player-name with-badge' }, teamBadge(name, 'sm'), name)
+      : el('div', { class: 'player-name' }, name),
     el('div', { class: 'options' }, outs.map((o) => {
       const added = onSlip.has(o.key);
       const sideText = outcomeSide(p, o);
