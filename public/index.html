@@ -233,38 +233,6 @@
               <button id="refresh" class="btn ghost sm" type="button">Refresh odds</button>
             </div>
           </div>
-          <!-- Profit boost calculator: estimate only, all on this device -->
-          <div id="boost" class="boost" hidden>
-            <div class="boost-head">
-              <label for="boost-range" class="boost-label">Profit boost</label>
-              <span id="boost-pct" class="boost-pct">No boost</span>
-            </div>
-            <input id="boost-range" type="range" min="0" max="105" step="5" value="0" aria-describedby="boost-note">
-            <div class="boost-chips" role="group" aria-label="Common boosts">
-              <button class="chip sm" type="button" data-boost="0">None</button>
-              <button class="chip sm" type="button" data-boost="25">25%</button>
-              <button class="chip sm" type="button" data-boost="30">30%</button>
-              <button class="chip sm" type="button" data-boost="50">50%</button>
-              <button class="chip sm" type="button" data-boost="100">100%</button>
-            </div>
-            <div class="boost-grid">
-              <div class="boost-cell">
-                <span class="boost-cap">Boosted odds</span>
-                <span id="boost-odds" class="boost-odds"></span>
-                <span id="boost-from" class="muted small"></span>
-              </div>
-              <div class="boost-cell">
-                <label for="boost-stake" class="boost-cap">Stake</label>
-                <span class="stake-wrap">$<input id="boost-stake" inputmode="decimal" value="10" maxlength="8" autocomplete="off"></span>
-              </div>
-              <div class="boost-cell">
-                <span class="boost-cap">Pays</span>
-                <span id="boost-pays" class="boost-pays"></span>
-                <span id="boost-extra" class="boost-extra small"></span>
-              </div>
-            </div>
-            <p id="boost-note" class="muted small boost-note">Estimate only. A profit boost raises your winnings, not your stake, and FanDuel may cap the extra winnings.</p>
-          </div>
           <form id="rename-slip-form" class="slip-name-form inline" autocomplete="off" hidden>
             <label for="rename-slip-name" class="field-label">New name</label>
             <div class="slip-name-row">
@@ -279,10 +247,60 @@
             <span class="muted small"><span id="live-status" class="live" hidden>Live</span> <span id="updated"></span></span>
             <span id="quota" class="muted small"></span>
           </div>
+
+          <!-- Profit boost calculator: folded by default, estimate only, all on this device -->
+          <div id="boost-wrap" class="boost-wrap" hidden>
+            <button id="boost-toggle" class="boost-toggle" type="button" aria-expanded="false" aria-controls="boost">
+              <span class="boost-toggle-title">Profit boost calculator</span>
+              <span id="boost-summary" class="boost-summary"></span>
+              <span class="caret" aria-hidden="true">▾</span>
+            </button>
+            <div id="boost" class="boost" hidden>
+              <div class="boost-head">
+                <label for="boost-range" class="boost-label">Profit boost</label>
+                <span id="boost-pct" class="boost-pct">No boost</span>
+              </div>
+              <input id="boost-range" type="range" min="0" max="105" step="5" value="0" aria-describedby="boost-note">
+              <div class="boost-chips" role="group" aria-label="Common boosts">
+                <button class="chip sm" type="button" data-boost="0">None</button>
+                <button class="chip sm" type="button" data-boost="25">25%</button>
+                <button class="chip sm" type="button" data-boost="30">30%</button>
+                <button class="chip sm" type="button" data-boost="50">50%</button>
+                <button class="chip sm" type="button" data-boost="100">100%</button>
+              </div>
+              <div class="boost-grid">
+                <div class="boost-cell">
+                  <span class="boost-cap">Boosted odds</span>
+                  <span id="boost-odds" class="boost-odds"></span>
+                  <span id="boost-from" class="muted small"></span>
+                </div>
+                <div class="boost-cell">
+                  <label for="boost-stake" class="boost-cap">Stake</label>
+                  <span class="stake-wrap">$<input id="boost-stake" inputmode="decimal" value="10" maxlength="8" autocomplete="off"></span>
+                </div>
+                <div class="boost-cell">
+                  <span class="boost-cap">Pays</span>
+                  <span id="boost-pays" class="boost-pays"></span>
+                  <span id="boost-extra" class="boost-extra small"></span>
+                </div>
+              </div>
+              <p id="boost-note" class="muted small boost-note">Estimate only. A profit boost raises your winnings, not your stake, and FanDuel may cap the extra winnings.</p>
+            </div>
+          </div>
+
           <div class="bet-row">
             <a id="place-bet" class="btn primary place-bet" target="_blank" rel="noopener" aria-disabled="true">Place bet</a>
             <button id="clear" class="btn danger-ghost" type="button" hidden>Clear slip</button>
             <button id="delete-slip" class="btn danger-ghost" type="button" hidden>Delete slip</button>
+          </div>
+          <div id="placed" class="placed" hidden>
+            <button id="placed-toggle" class="placed-chip" type="button" aria-expanded="false" aria-controls="placed-panel">
+              Placed · <span id="placed-count">0</span> <span class="caret" aria-hidden="true">▾</span>
+            </button>
+            <div id="placed-panel" class="placed-panel" hidden>
+              <ul id="placed-list" class="placed-list"></ul>
+              <p class="muted small placed-note">Shows who tapped Place bet on this slip. The app can't see FanDuel, so it can't confirm the bet went through.</p>
+            </div>
           </div>
           <div id="slip-confirm" class="slip-confirm" hidden>
             <span id="slip-confirm-text" class="small"></span>

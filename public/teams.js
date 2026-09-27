@@ -148,6 +148,24 @@ function guessBadge(name) {
   return [abbr.toUpperCase().slice(0, 4), '#2A3530', `hsl(${h % 360} 55% 55%)`];
 }
 
+// Short name for tight spots (odds board): pro teams by nickname ("Bills", "Red Sox"),
+// colleges by school ("Ohio State", "Notre Dame").
+const PRO_TWO_WORD = /\s(Red Sox|White Sox|Blue Jays|Golden Knights|Maple Leafs|Trail Blazers|Red Wings|Blue Jackets)$/;
+const SHORT_OVERRIDES = { 'Utah Hockey Club': 'Utah' };
+const COLLEGE_START = Object.keys(TEAM_BADGES).indexOf('Alabama Crimson Tide');
+const PRO_NAMES = new Set(Object.keys(TEAM_BADGES).slice(0, COLLEGE_START));
+function shortName(name) {
+  const full = String(name || '');
+  if (SHORT_OVERRIDES[full]) return SHORT_OVERRIDES[full];
+  if (PRO_NAMES.has(full)) {
+    const two = full.match(PRO_TWO_WORD);
+    if (two) return two[1];
+    return /^\S+$/.test(full) ? full : full.split(' ').pop(); // "Athletics" stays as is
+  }
+  if (TWO_WORD_MASCOTS.test(full)) return full.replace(TWO_WORD_MASCOTS, '');
+  return full.includes(' ') ? full.replace(/\s+\S+$/, '') : full;
+}
+
 function teamInfo(name) {
   return TEAM_BADGES[name] || guessBadge(name);
 }

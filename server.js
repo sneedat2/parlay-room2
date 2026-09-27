@@ -181,7 +181,9 @@ function migrateSingleGroup() {
 }
 
 // Groups used to have one slip (group.legs). Now each group has named slips; old legs become "Main slip".
-const newSlip = (name, createdBy, legs = []) => ({ id: newId(), name, createdBy, createdAt: new Date().toISOString(), legs });
+const newSlip = (name, createdBy, legs = []) => ({ id: newId(), name, createdBy, createdAt: new Date().toISOString(), legs, rev: 0, placements: {} });
+// Every change to a slip's legs bumps rev, so "Placed" taps from before a change can be flagged.
+const touchSlip = (s) => { s.rev = (s.rev || 0) + 1; };
 function migrateSlips() {
   let changed = false;
   for (const g of db.groups) {
@@ -1026,6 +1028,23 @@ async function handleApi(req, res, url) {
     return send(res, 200, { ok: true });
   }
 
+  // "Placed": record that I tapped Place bet on this slip (everyone may, even view-only members).
+  // The app can't see FanDuel, so this means "opened FanDuel from this slip", not a confirmed bet.
+  if (slip && slipSub === '/placed' && req.method === 'POST') {
+    if (!slip.legs.length) return send(res, 400, { error: 'This slip has no legs yet.' });
+    slip.placements = slip.placements || {};
+    slip.placements[me.id] = { at: new Date().toISOString(), rev: slip.rev || 0 };
+    save();
+    notifyGroup(group.id, 'placed');
+    return send(res, 200, { ok: true });
+  }
+  if (slip && slipSub === '/placed' && req.method === 'DELETE') {
+    if (slip.placements) delete slip.placements[me.id];
+    save();
+    notifyGroup(group.id, 'placed');
+    return send(res, 200, { ok: true });
+  }
+
   // Add a leg to this slip
   if (slip && slipSub === '/legs' && req.method === 'POST') {
     if (!canEditGroup(group, me.id)) return send(res, 403, { error: LOCKED_MSG });
@@ -1050,6 +1069,7 @@ async function handleApi(req, res, url) {
       oddsAt: new Date().toISOString(), unavailable: false,
     };
     slip.legs.push(leg);
+    touchSlip(slip);
     save();
     notifyGroup(group.id, 'legs');
     // Ping everyone else's phone. Don't make the adder wait for it.
@@ -1069,6 +1089,8 @@ async function handleApi(req, res, url) {
   if (slip && slipSub === '/legs' && req.method === 'DELETE') {
     if (!canManageSlip) return send(res, 403, { error: slipDenied('clear') });
     slip.legs = [];
+    slip.placements = {}; // a cleared slip starts fresh
+    touchSlip(slip);
     save();
     notifyGroup(group.id, 'legs');
     return send(res, 200, { ok: true });
@@ -1086,6 +1108,7 @@ async function handleApi(req, res, url) {
   if (leg && !legMatch[2] && req.method === 'DELETE') {
     if (!canManageLeg) return send(res, 403, { error: legDenied('remove') });
     slip.legs = slip.legs.filter((l) => l.id !== leg.id);
+    touchSlip(slip);
     save();
     notifyGroup(group.id, 'legs');
     return send(res, 200, { ok: true });
@@ -1103,6 +1126,8 @@ async function handleApi(req, res, url) {
     }
     slip.legs = slip.legs.filter((l) => l.id !== leg.id);
     target.legs.push(leg);
+    touchSlip(slip);
+    touchSlip(target);
     save();
     notifyGroup(group.id, 'legs');
     return send(res, 200, { ok: true, to: target.name });
@@ -1268,13 +1293,27 @@ function demoExtraMarket(g, market, players) {
       { name: 'Under', point: pt, price: am((total - pt) / step * 22 - 10) },
     ]);
   }
-  if (market.startsWith('h2h')) return [{ name: g.away, price: 130 }, { name: g.home, price: -155 }];
+  // Each demo game gets its own favorite and number, consistent across ML, spread and total.
+  const strength = seeded(g.id) - 0.5;               // -0.5..0.5: >0 means the home team is favored
+  const fav = strength >= 0 ? g.home : g.away;
+  const dog = fav === g.home ? g.away : g.home;
+  const gap = Math.abs(strength) * 2;                // 0..1
+  if (market.startsWith('h2h')) {
+    const favPrice = -(110 + Math.round(gap * 250 * scale / 5) * 5);
+    const dogPrice = Math.max(100, Math.abs(favPrice) - 20);
+    const price = (team) => (team === fav ? favPrice : dogPrice);
+    return [{ name: g.away, price: price(g.away) }, { name: g.home, price: price(g.home) }];
+  }
   if (market.startsWith('spreads')) {
-    const pt = Math.max(0.5, Math.round(3 * scale) + 0.5);
-    return [{ name: g.away, point: pt, price: -110 }, { name: g.home, point: -pt, price: -110 }];
+    const pt = g.id.includes('mlb') ? 1.5 : Math.max(0.5, Math.round((1 + gap * 12) * scale)) + 0.5;
+    return [
+      { name: g.away, point: g.away === fav ? -pt : pt, price: juice('a') },
+      { name: g.home, point: g.home === fav ? -pt : pt, price: juice('h') },
+    ];
   }
   if (market.startsWith('totals')) {
-    return [{ name: 'Over', point: total, price: juice('o') }, { name: 'Under', point: total, price: juice('u') }];
+    const t = market.includes('_1st_1_innings') ? total : Math.round(total + (seeded(g.id + 't') - 0.5) * total * 0.12) + 0.5;
+    return [{ name: 'Over', point: t, price: juice('o') }, { name: 'Under', point: t, price: juice('u') }];
   }
   return [];
 }
@@ -1326,9 +1365,6 @@ function demoOdds(sport, eventId, market) {
     case 'batter_rbis': outcomes = P.B.flatMap((p) => ou(p, 0.5)); break;
     case 'batter_hits_runs_rbis': outcomes = P.B.flatMap((p) => ou(p, 1.5)); break;
     case 'pitcher_strikeouts': outcomes = P.P.flatMap((p) => ou(p, line(p, 6, 3, 1))); break;
-    case 'h2h': outcomes = [{ name: g.away, price: 125 }, { name: g.home, price: -148 }]; break;
-    case 'spreads': outcomes = [{ name: g.away, point: 2.5, price: -110 }, { name: g.home, point: -2.5, price: -110 }]; break;
-    case 'totals': outcomes = [{ name: 'Over', point: 46.5, price: -108 }, { name: 'Under', point: 46.5, price: -112 }]; break;
   }
   if (!outcomes.length) outcomes = demoExtraMarket(g, market, Object.values(P).flat());
   return {

@@ -688,6 +688,7 @@ function renderSlip() {
   renderBoost();
 
   renderPlaceBet(slip, data, live);
+  renderPlaced(slip);
 
   const list = $('#legs');
   list.replaceChildren();
@@ -746,16 +747,27 @@ function boostStake() {
   return Number.isFinite(v) && v > 0 && v <= 1000000 ? v : null;
 }
 
+// Folded by default so it's there when you want it, not always in the way.
+let boostOpen = false;
+$('#boost-toggle').addEventListener('click', () => {
+  boostOpen = !boostOpen;
+  renderBoost();
+});
+
 function renderBoost() {
   const dec = state.parlayDec;
-  $('#boost').hidden = !dec;
+  $('#boost-wrap').hidden = !dec;
   if (!dec) return;
+  $('#boost').hidden = !boostOpen;
+  $('#boost-toggle').setAttribute('aria-expanded', String(boostOpen));
   const pct = boostPct();
   $('#boost-range').value = pct;
   $('#boost-pct').textContent = pct ? `+${pct}%` : 'No boost';
   document.querySelectorAll('.boost-chips .chip').forEach((c) => c.setAttribute('aria-pressed', String(Number(c.dataset.boost) === pct)));
 
   const boosted = 1 + (dec - 1) * (1 + pct / 100);
+  // Closed row shows the result at a glance once a boost is set.
+  $('#boost-summary').textContent = pct ? `+${pct}% → ${fmtOdds(toAmerican(boosted))}` : '';
   $('#boost-odds').textContent = fmtOdds(toAmerican(boosted));
   $('#boost-from').textContent = pct ? `from ${fmtOdds(toAmerican(dec))}` : 'same as the slip';
 
@@ -809,8 +821,60 @@ function renderPlaceBet(slip, data, live) {
 }
 
 $('#place-bet').addEventListener('click', (e) => {
-  if (!$('#place-bet').getAttribute('href')) { e.preventDefault(); toast('Add a leg to the slip first'); }
+  if (!$('#place-bet').getAttribute('href')) { e.preventDefault(); toast('Add a leg to the slip first'); return; }
+  // FanDuel opens in a new tab; record the tap in the background. keepalive lets it finish even if
+  // the phone switches straight to the FanDuel app.
+  const slip = currentSlip();
+  if (!slip) return;
+  fetch(`/api/groups/${state.groupId}/slips/${slip.id}/placed`, {
+    method: 'POST', keepalive: true,
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${state.token}` },
+  }).catch(() => { /* not critical */ });
+  // Show it right away; the live update confirms it a moment later.
+  slip.placements = { ...(slip.placements || {}), [state.me.id]: { at: new Date().toISOString(), rev: slip.rev || 0 } };
+  renderPlaced(slip);
 });
+
+// ---------------------------------------------------------------- "Placed" list
+// Who tapped Place bet on this slip, newest first. One entry per person; taps from before the
+// slip's legs changed are marked so nobody assumes they bet the current version.
+let placedOpen = false;
+
+function renderPlaced(slip) {
+  const entries = Object.entries(slip.placements || {})
+    .map(([id, p]) => ({ id, ...p, name: memberName(id) }))
+    .filter((p) => p.name) // people who left the group drop off
+    .sort((a, b) => b.at.localeCompare(a.at));
+  $('#placed').hidden = !entries.length;
+  if (!entries.length) { placedOpen = false; }
+  $('#placed-count').textContent = entries.length;
+  $('#placed-toggle').setAttribute('aria-expanded', String(placedOpen));
+  $('#placed-panel').hidden = !placedOpen;
+  $('#placed-list').replaceChildren(...entries.map((p) => {
+    const stale = (p.rev || 0) < (slip.rev || 0);
+    const mine = p.id === state.me.id;
+    return el('li', { class: 'placed-row' },
+      el('span', { class: 'placed-name' }, p.name, mine ? el('span', { class: 'muted' }, ' (you)') : null),
+      el('span', { class: 'placed-when' },
+        ago(p.at),
+        stale ? el('span', { class: 'placed-stale' }, ' · before slip changed') : null),
+      mine ? el('button', { class: 'link-btn', type: 'button', onclick: () => unplace(slip) }, 'Remove me') : null);
+  }));
+}
+
+$('#placed-toggle').addEventListener('click', () => {
+  placedOpen = !placedOpen;
+  const slip = currentSlip();
+  if (slip) renderPlaced(slip);
+});
+
+async function unplace(slip) {
+  try {
+    await groupApi(`/slips/${slip.id}/placed`, { method: 'DELETE' });
+    toast('Removed you from the Placed list');
+  } catch (ex) { toast(ex.message); }
+  loadLegs(false);
+}
 
 async function removeLeg(slip, leg) {
   try {

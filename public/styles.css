@@ -130,8 +130,35 @@ input, select {
 .view-only { margin: 0 0 12px; padding: 10px 14px; border-radius: 10px; background: var(--surface); border-left: 4px solid var(--accent); font-size: 14px; box-shadow: var(--shadow); }
 @media (min-width: 900px) { .panels.single { grid-template-columns: minmax(0, 720px); justify-content: center; } }
 
+/* "Placed" list under Place bet */
+.placed { margin-top: 8px; }
+.placed-chip {
+  display: inline-flex; align-items: center; gap: 4px; min-height: 30px; padding: 0 10px; border-radius: 999px;
+  border: 1px solid var(--line); background: var(--surface-2); color: var(--ink); font-size: 13px; font-weight: 600; cursor: pointer;
+}
+.placed-chip[aria-expanded="true"] .caret { display: inline-block; transform: rotate(180deg); }
+.placed-panel { margin-top: 6px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface-2); padding: 6px 12px 10px; max-width: 420px; }
+.placed-list { list-style: none; margin: 0; padding: 0; }
+.placed-row { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 10px; padding: 7px 0; border-bottom: 1px solid var(--line); }
+.placed-row:last-child { border-bottom: 0; }
+.placed-name { font-weight: 600; flex: 1 1 auto; }
+.placed-when { font-size: 13px; color: var(--muted); }
+.placed-stale { color: var(--down); }
+.placed-note { margin: 6px 0 0; }
+
 /* Profit boost calculator */
-.boost { margin-top: 14px; padding: 12px 14px; border-radius: 12px; background: var(--surface-2); border: 1px dashed var(--stub); display: flex; flex-direction: column; gap: 10px; }
+.boost-wrap { margin-top: 12px; }
+.boost-toggle {
+  width: 100%; display: flex; align-items: center; gap: 10px; min-height: 42px; padding: 0 12px;
+  border-radius: 10px; border: 1px dashed var(--stub); background: var(--surface-2); color: var(--ink);
+  font-weight: 600; font-size: 14px; cursor: pointer; text-align: left;
+}
+.boost-toggle-title { flex: 1; }
+.boost-summary { font: 700 15px/1 var(--display); color: var(--stub); font-variant-numeric: tabular-nums; }
+.boost-toggle .caret { color: var(--muted); transition: transform .15s; }
+.boost-toggle[aria-expanded="true"] { border-radius: 10px 10px 0 0; border-bottom-style: none; }
+.boost-toggle[aria-expanded="true"] .caret { transform: rotate(180deg); }
+.boost { padding: 12px 14px; border-radius: 0 0 12px 12px; background: var(--surface-2); border: 1px dashed var(--stub); border-top: 0; display: flex; flex-direction: column; gap: 10px; }
 .boost-head { display: flex; justify-content: space-between; align-items: baseline; }
 .boost-label { font-weight: 600; font-size: 12px; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); }
 .boost-pct { font: 700 22px/1 var(--display); color: var(--stub); font-variant-numeric: tabular-nums; }
@@ -181,6 +208,7 @@ input, select {
 .game-chosen-teams { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
 .game-chosen-when { font-size: 12px; font-weight: 600; color: var(--muted); letter-spacing: .04em; text-transform: uppercase; }
 .player-name.with-badge { display: flex; align-items: center; gap: 8px; }
+
 
 /* Market rows in Find props */
 .market-row { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
