@@ -230,7 +230,7 @@
             </div>
             <div class="slip-actions">
               <button id="rename-slip" class="btn ghost sm" type="button" hidden>Rename</button>
-              <button id="refresh" class="btn ghost sm" type="button">Refresh odds</button>
+              <button id="refresh" class="btn ghost sm" type="button">Update odds now</button>
             </div>
           </div>
           <form id="rename-slip-form" class="slip-name-form inline" autocomplete="off" hidden>
@@ -391,18 +391,29 @@
             <select id="add-to-slip"></select>
           </div>
           <div id="sports" class="chips" role="tablist" aria-label="Sport"></div>
-          <div id="game-picker" class="game-picker"></div>
-          <div class="market-row">
-            <span class="row-label">Player props</span>
-            <div id="markets-player" class="chips scroll" role="tablist" aria-label="Player props"></div>
+          <div class="view-switch" role="tablist" aria-label="How to browse">
+            <button id="view-game" class="view-tab" type="button" role="tab" aria-selected="true">By game</button>
+            <button id="view-market" class="view-tab" type="button" role="tab" aria-selected="false">By market</button>
           </div>
-          <div class="market-row">
-            <span class="row-label">Game lines</span>
-            <div id="markets-game" class="chips scroll" role="tablist" aria-label="Game lines"></div>
+
+          <!-- By game: pick one game, then a market -->
+          <div id="by-game" class="by-game">
+            <div id="game-picker" class="game-picker"></div>
+            <div class="market-row">
+              <span class="row-label">Player props</span>
+              <div id="markets-player" class="chips scroll" role="tablist" aria-label="Player props"></div>
+            </div>
+            <div class="market-row">
+              <span class="row-label">Game lines</span>
+              <div id="markets-game" class="chips scroll" role="tablist" aria-label="Game lines"></div>
+            </div>
+            <input id="search" type="search" placeholder="Search a player or team" aria-label="Search player or team">
+            <p id="find-status" class="muted small"></p>
+            <ul id="outcomes" class="outcomes"></ul>
           </div>
-          <input id="search" type="search" placeholder="Search a player or team" aria-label="Search player or team">
-          <p id="find-status" class="muted small"></p>
-          <ul id="outcomes" class="outcomes"></ul>
+
+          <!-- By market: pick a category (TDs, Rush Yards...), see every game's players as ladders -->
+          <div id="by-market" class="by-market" hidden></div>
         </div>
       </section>
     </div>

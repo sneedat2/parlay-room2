@@ -18,6 +18,8 @@ const API_KEY = process.env.ODDS_API_KEY || '';
 const CREATE_CODE = process.env.GROUP_CREATE_CODE || '';
 const FANDUEL_STATE = (process.env.FANDUEL_STATE || '').toLowerCase();
 const CACHE_SECONDS = Number(process.env.ODDS_CACHE_SECONDS) || 120;
+// How often slip odds re-price on their own while someone has the group open (per group, not per person).
+const SLIP_ODDS_MINUTES = Number(process.env.SLIP_ODDS_MINUTES) || 5;
 // Where accounts, groups and slips are saved. On Railway this must be on an attached volume,
 // or every deploy starts from an empty file. Railway tells us the volume's path, so use it.
 const VOLUME_DIR = process.env.RAILWAY_VOLUME_MOUNT_PATH || '';
@@ -341,12 +343,13 @@ const fmtOdds = (p) => (p > 0 ? `+${p}` : `${p}`);
 const quota = { remaining: null, used: null };
 const cache = new Map();
 
-async function oddsApi(pathname, params = {}, ttlSeconds = CACHE_SECONDS) {
+// force = skip the shared cache and fetch brand-new odds (used by "Update odds now").
+async function oddsApi(pathname, params = {}, ttlSeconds = CACHE_SECONDS, force = false) {
   const url = new URL('https://api.the-odds-api.com/v4' + pathname);
   for (const [k, v] of Object.entries(params)) url.searchParams.set(k, v);
   const cacheKey = url.toString();
   const hit = cache.get(cacheKey);
-  if (hit && hit.expires > Date.now()) return hit.data;
+  if (!force && hit && hit.expires > Date.now()) return hit.data;
 
   url.searchParams.set('apiKey', API_KEY);
   const res = await fetch(url);
@@ -408,7 +411,7 @@ const ALT_MARKETS = new Set([
 ]);
 const altKey = (market) => (ALT_MARKETS.has(market) ? `${market}_alternate` : null);
 
-async function getProps(sport, eventId, market) {
+async function getProps(sport, eventId, market, { force = false } = {}) {
   const alt = altKey(market);
   const raw = DEMO
     ? demoOdds(sport, eventId, market)
@@ -419,7 +422,7 @@ async function getProps(sport, eventId, market) {
       oddsFormat: 'american',
       includeLinks: 'true',
       includeSids: 'true',
-    });
+    }, CACHE_SECONDS, force);
   const bk = (raw.bookmakers || []).find((b) => b.key === 'fanduel');
   const main = bk?.markets?.find((x) => x.key === market);
   const altM = alt && bk?.markets?.find((x) => x.key === alt);
@@ -955,13 +958,29 @@ async function handleApi(req, res, url) {
     return send(res, 200, { ...(await getProps(sport, event, market)), quota });
   }
 
+  // "By market" view: one game's players laid out as a ladder (40+, 50+, 60+) or, for TDs, as columns.
+  if (pathname === '/api/ladder') {
+    const sport = url.searchParams.get('sport');
+    const event = url.searchParams.get('event');
+    const kind = url.searchParams.get('kind');
+    const ok = kind === 'tds' || sportByKey(sport)?.markets.some((m) => m.key === kind && m.group === 'player');
+    if (!sportByKey(sport) || !event || !ok) return send(res, 400, { error: 'Pick a sport, game and category.' });
+    return send(res, 200, { ...(await getLadder(sport, event, kind)), quota });
+  }
+
   // ---- Slips: every group has one or more named slips, each with its own legs and Place bet.
 
   // Everything the slip screen needs, in one call.
   if (group && sub === '/slips' && req.method === 'GET') {
-    if (url.searchParams.get('fresh') === '1') await refreshLegOdds(group);
+    // fresh=auto: re-price legs only if the group's odds are older than SLIP_ODDS_MINUTES.
+    // fresh=force: "Update odds now" - brand-new odds, skipping the throttle and the shared cache.
+    const fresh = url.searchParams.get('fresh');
+    if (fresh === 'force') await refreshLegOdds(group, { force: true });
+    else if (fresh) await refreshLegOdds(group, { onlyIfOlderThan: SLIP_ODDS_MINUTES * 60 * 1000 });
     return send(res, 200, {
       group: groupView(group),
+      oddsAt: group.oddsAt || null,
+      oddsEveryMinutes: SLIP_ODDS_MINUTES,
       slips: group.slips.map((s) => {
         const slipLink = parlayLink(s.legs.filter((l) => !l.unavailable));
         return {
@@ -1136,9 +1155,95 @@ async function handleApi(req, res, url) {
   return send(res, 404, { error: 'Not found' });
 }
 
+// ---------------------------------------------------------------- "By market" ladders
+// Built from the same getProps() data (and shared cache) as the rest of the app, so every box
+// adds exactly the same leg as picking it the normal way.
+
+const cellOf = (market, o) => ({ market, key: o.key, price: o.price, label: o.label });
+
+async function getLadder(sport, eventId, kind) {
+  if (kind === 'tds') return tdColumns(sport, eventId);
+
+  const p = await getProps(sport, eventId, kind);
+  const byPlayer = new Map();
+  for (const o of p.outcomes) {
+    if (!o.player) continue;
+    if (!byPlayer.has(o.player)) byPlayer.set(o.player, { milestones: [], main: [] });
+    const entry = byPlayer.get(o.player);
+    if (o.alt && /\+$/.test(o.side)) entry.milestones.push(o);
+    else entry.main.push(o);
+  }
+  const players = [];
+  for (const [name, { milestones, main }] of byPlayer) {
+    let rungs;
+    if (milestones.length) {
+      // FanDuel-style ladder: 40+, 50+, 60+ ... low to high.
+      rungs = milestones
+        .sort((a, b) => parseFloat(a.side) - parseFloat(b.side))
+        .map((o) => ({ ...cellOf(kind, o), top: o.side }));
+    } else {
+      // No milestone lines: show the main line (Over/Under, or Yes).
+      rungs = main.map((o) => ({ ...cellOf(kind, o), top: o.point != null ? `${o.side[0]} ${o.point}` : o.side }));
+    }
+    // Rank by role: the threshold where the odds are closest to even money (bigger = bigger role).
+    const mainLine = main.find((o) => o.point != null)?.point;
+    const nearEven = milestones.length
+      ? parseFloat(milestones.reduce((best, o) => (Math.abs(Math.abs(o.price) - 100) < Math.abs(Math.abs(best.price) - 100) ? o : best)).side)
+      : mainLine ?? -Math.min(...main.map((o) => o.price));
+    players.push({ name, rungs, rank: nearEven });
+  }
+  players.sort((a, b) => b.rank - a.rank);
+  return { type: 'ladder', kind, event: p.event, marketLabel: p.marketLabel, players: players.map(({ rank, ...rest }) => rest) };
+}
+
+// TDs: ANYTIME | FIRST | 2+ | 3+ columns, one row per player (like FanDuel's TD tab).
+async function tdColumns(sport, eventId) {
+  const markets = ['player_anytime_td', 'player_1st_td', 'player_tds_over'];
+  const results = await Promise.all(markets.map((m) => getProps(sport, eventId, m).catch(() => null)));
+  const event = results.find(Boolean)?.event;
+  const rows = new Map();
+  const cols = new Set();
+  const put = (name, col, cell) => {
+    if (!rows.has(name)) rows.set(name, {});
+    rows.get(name)[col] = cell;
+    cols.add(col);
+  };
+  const [anytime, first, over] = results;
+  for (const o of anytime?.outcomes || []) if (o.player && o.side === 'Yes') put(o.player, 'Anytime', cellOf('player_anytime_td', o));
+  for (const o of first?.outcomes || []) if (o.player && o.side === 'Yes') put(o.player, 'First', cellOf('player_1st_td', o));
+  for (const o of over?.outcomes || []) {
+    // "Over 1.5 TDs" is FanDuel's 2+ ("Over 2.5" = 3+). Unders aren't part of this view.
+    const pt = o.point ?? (parseFloat(o.side) - 0.5);
+    if (o.player && (o.side === 'Over' || /\+$/.test(o.side)) && pt >= 1) put(o.player, `${Math.ceil(pt)}+`, cellOf('player_tds_over', o));
+  }
+  const order = ['Anytime', 'First', ...[...cols].filter((c) => /\+$/.test(c)).sort((a, b) => parseInt(a, 10) - parseInt(b, 10))];
+  const columns = order.filter((c) => cols.has(c));
+  // Most likely scorers first.
+  const likelihood = (r) => (r.Anytime ? toProb(r.Anytime.price) : 0);
+  const players = [...rows].map(([name, cells]) => ({ name, cells }))
+    .sort((a, b) => likelihood(b.cells) - likelihood(a.cells));
+  return { type: 'columns', kind: 'tds', event, marketLabel: 'TDs', columns, players };
+}
+
+const toProb = (p) => (p < 0 ? -p / (-p + 100) : 100 / (p + 100));
+
 // Re-price every leg on every slip from FanDuel. One API call per unique game+market (cached),
 // so the same prop on three slips still costs one call.
-async function refreshLegOdds(group) {
+// Throttled per group: auto refreshes run at most every SLIP_ODDS_MINUTES however many people have
+// the app open, and "Update odds now" taps within FORCE_GAP_MS of each other share one fetch.
+const refreshing = new Map(); // groupId -> in-flight refresh, so simultaneous requests share it
+const FORCE_GAP_MS = 30 * 1000;
+
+async function refreshLegOdds(group, { force = false, onlyIfOlderThan = 0 } = {}) {
+  const age = group.oddsAt ? Date.now() - Date.parse(group.oddsAt) : Infinity;
+  if (force ? age < FORCE_GAP_MS : age < onlyIfOlderThan) return;
+  if (refreshing.has(group.id)) return refreshing.get(group.id);
+  const run = repriceLegs(group, force).finally(() => refreshing.delete(group.id));
+  refreshing.set(group.id, run);
+  return run;
+}
+
+async function repriceLegs(group, force) {
   const groups = new Map();
   for (const leg of group.slips.flatMap((s) => s.legs)) {
     const k = `${leg.sport}|${leg.eventId}|${leg.market}`;
@@ -1149,7 +1254,7 @@ async function refreshLegOdds(group) {
   await Promise.all([...groups.values()].map(async (legs) => {
     const { sport, eventId, market } = legs[0];
     let props;
-    try { props = await getProps(sport, eventId, market); } catch { return; }
+    try { props = await getProps(sport, eventId, market, { force }); } catch { return; }
     for (const leg of legs) {
       const o = props.outcomes.find((x) => x.key === leg.key);
       if (!o) { if (!leg.unavailable) { leg.unavailable = true; changed = true; } continue; }
@@ -1157,10 +1262,10 @@ async function refreshLegOdds(group) {
       Object.assign(leg, { price: o.price, link: o.link, sid: o.sid, marketSid: o.marketSid, unavailable: false, oddsAt: new Date().toISOString() });
     }
   }));
-  if (changed) {
-    save();
-    notifyGroup(group.id, 'odds');
-  }
+  group.oddsAt = new Date().toISOString();
+  save();
+  // Everyone else's screen reloads the slip (no extra credits) so they see the new odds and time.
+  notifyGroup(group.id, changed ? 'odds' : 'odds-checked');
 }
 
 http.createServer(async (req, res) => {
@@ -1318,6 +1423,26 @@ function demoExtraMarket(g, market, players) {
   return [];
 }
 
+// Milestones around each player's main line: e.g. line 58.5 -> 30+, 40+, 50+, 60+, 70+, 80+.
+function demoMilestones(market, outcomes) {
+  if (!ALT_MARKETS.has(market) || market === 'batter_home_runs') return [];
+  const am = (v) => Math.round(v >= 0 ? 100 + v : -100 + v);
+  const out = [];
+  for (const o of outcomes) {
+    if (o.name !== 'Over' || o.point == null || !o.description) continue;
+    const line = o.point;
+    const step = line >= 150 ? 25 : line >= 30 ? 10 : line >= 8 ? 5 : 1;
+    const base = Math.max(step, Math.floor(line / step) * step);
+    for (let i = -2; i <= 3; i++) {
+      const t = base + i * step;
+      if (t < 1) continue;
+      const dist = (t - line) / step; // below the line = likely (negative odds), above = long shot
+      out.push({ name: 'Over', description: o.description, point: t - 0.5, price: am(dist * 160 - 30) });
+    }
+  }
+  return out;
+}
+
 function demoOdds(sport, eventId, market) {
   const g = (DEMO_GAMES[sport] || []).find((x) => x.id === eventId);
   if (!g) throw Object.assign(new Error('Game not found.'), { status: 404 });
@@ -1367,8 +1492,12 @@ function demoOdds(sport, eventId, market) {
     case 'pitcher_strikeouts': outcomes = P.P.flatMap((p) => ou(p, line(p, 6, 3, 1))); break;
   }
   if (!outcomes.length) outcomes = demoExtraMarket(g, market, Object.values(P).flat());
+  const markets = [{ key: market, last_update: new Date().toISOString(), outcomes }];
+  // Like real FanDuel data, stat props also come with milestone ladders (40+, 50+, 60+) in the alternate market.
+  const alt = demoMilestones(market, outcomes);
+  if (alt.length) markets.push({ key: `${market}_alternate`, last_update: new Date().toISOString(), outcomes: alt });
   return {
     id: g.id, home_team: g.home, away_team: g.away, commence_time: ev.commence,
-    bookmakers: [{ key: 'fanduel', markets: [{ key: market, last_update: new Date().toISOString(), outcomes }] }],
+    bookmakers: [{ key: 'fanduel', markets }],
   };
 }

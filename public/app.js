@@ -366,11 +366,13 @@ function openGroup(id, showInvite = false) {
   renderGroupHeader();
   showScreen('app');
   showTab(store('pr_tab') || 'slip');
-  loadLegs(true);
+  loadLegs('auto'); // only costs credits if the group's odds are over 5 minutes old
   if (!state.sports.length) loadSports().catch((ex) => { $('#find-status').textContent = ex.message; });
   else if (state.props) renderOutcomes();
   clearInterval(poll);
-  poll = setInterval(() => { if (!document.hidden) loadLegs(false); }, 20000);
+  // Every 20s while the app is on screen: pick up slip changes, and let the server re-price odds
+  // once they're 5 minutes old (once per group, no matter how many people are looking).
+  poll = setInterval(() => { if (!document.hidden) loadLegs('auto'); }, 20000);
   connectLive();
   renderNotify();
 }
@@ -599,14 +601,19 @@ function showTab(name) {
 let legsRequested = 0; // newest request sent
 let legsShown = 0;     // newest request drawn on screen
 
+// fresh: false = just reload the slip (free)
+//        'auto' = also re-price legs if the group's odds are older than 5 minutes (the server decides)
+//        'force' = "Update odds now": brand-new odds from FanDuel
 async function loadLegs(fresh) {
   if (!state.groupId) return;
   const gid = state.groupId;
   const seq = ++legsRequested;
   const btn = $('#refresh');
-  if (fresh) { btn.disabled = true; btn.textContent = 'Refreshing…'; }
+  const forced = fresh === 'force';
+  if (forced) { btn.disabled = true; btn.textContent = 'Updating…'; }
   try {
-    const data = await groupApi(`/slips${fresh ? '?fresh=1' : ''}`);
+    const data = await groupApi(`/slips${fresh ? `?fresh=${fresh}` : ''}`);
+    if (forced) toast('Odds updated from FanDuel');
     if (gid !== state.groupId) return; // switched groups meanwhile
     if (seq < legsShown) return;       // a newer answer already arrived; don't roll the slip back
     legsShown = seq;
@@ -620,18 +627,19 @@ async function loadLegs(fresh) {
     renderSlip();
     renderAddTo();
     if (state.props) renderOutcomes();
+    markLadderAdded();
   } catch (ex) {
     if (/not in that group/.test(ex.message)) {
       toast(ex.message);
       await loadMe().catch(() => {});
       showGroups();
-    } else if (fresh) {
+    } else if (forced) {
       toast(ex.message); // background checks stay quiet (e.g. phone briefly offline)
     }
   } finally {
-    if (fresh) {
+    if (forced) {
       btn.disabled = false;
-      btn.textContent = 'Refresh odds';
+      btn.textContent = 'Update odds now';
     }
   }
 }
@@ -727,7 +735,10 @@ function renderSlip() {
           canRemove ? el('button', { class: 'btn ghost sm', type: 'button', onclick: () => removeLeg(slip, leg) }, 'Remove') : null))));
   }
 
-  $('#updated').textContent = `Updated ${new Date(data.at).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}`;
+  // How fresh the odds are, so nobody needs to tap Update unless they want to.
+  $('#updated').textContent = data.oddsAt && state.slips.some((s) => s.legs.length)
+    ? `Odds from ${ago(data.oddsAt)} · auto every ${data.oddsEveryMinutes} min`
+    : `Updated ${new Date(data.at).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}`;
   $('#quota').textContent = data.quota && data.quota.remaining != null ? `${data.quota.remaining} API credits left` : '';
   const confirming = !$('#slip-confirm').hidden;
   $('#clear').hidden = confirming || !(manage && legs.length);
@@ -892,7 +903,7 @@ async function moveLeg(slip, leg, toSlipId) {
   loadLegs(false);
 }
 
-$('#refresh').addEventListener('click', () => loadLegs(true));
+$('#refresh').addEventListener('click', () => loadLegs('force'));
 
 // One inline "are you sure?" row, shared by Clear slip and Delete slip.
 let confirmAction = null;
@@ -995,6 +1006,7 @@ function renderAddTo() {
 }
 $('#add-to-slip').addEventListener('change', (e) => {
   state.addSlipId = e.target.value;
+  markLadderAdded();
   if (state.props) renderOutcomes();
 });
 
@@ -1026,7 +1038,10 @@ async function selectSport(key) {
   $('#outcomes').replaceChildren();
   state.props = null;
   state.event = null;
+  state.events = [];
+  state.openGames = new Set();
   $('#game-picker').replaceChildren();
+  renderMarketView();
   try {
     const { events } = await api(`/api/events?sport=${key}`);
     if (state.sport !== key) return; // switched sports while loading
@@ -1034,6 +1049,7 @@ async function selectSport(key) {
     if (!events.length) {
       $('#find-status').textContent = 'No upcoming games on FanDuel for this sport.';
       renderGamePicker();
+      renderMarketView();
       return;
     }
     // Reopen the game you last picked for this sport; otherwise start on the first day with games.
@@ -1045,12 +1061,13 @@ async function selectSport(key) {
       state.event = lastGame.id;
       state.pickerOpen = false;
       renderGamePicker();
-      loadProps();
+      if (state.view === 'game') loadProps(); // the market view loads nothing until a game is opened
     } else {
       state.pickerOpen = true;
       renderGamePicker();
       $('#find-status').textContent = 'Pick a game to see its odds.';
     }
+    renderMarketView();
   } catch (ex) {
     $('#find-status').textContent = ex.message;
   }
@@ -1149,6 +1166,180 @@ function renderGamePicker() {
       el('span', { class: `game-time${new Date(e.commence) <= new Date() ? ' started' : ''}` }, gameTime(e.commence)))))
       : [el('li', { class: 'empty small' }, 'No games match that team.')]));
   }
+}
+
+// ---------------------------------------------------------------- "By market" view
+// FanDuel-style: pick a category (TDs, Rush Yards...) and see each game's players as ladders
+// (40+ / 50+ / 60+) or TD columns. Games start closed and load only when opened, so browsing a
+// full slate doesn't spend credits on games nobody looks at.
+
+const LADDER_KINDS = {
+  americanfootball: [['tds', 'TDs'], ['player_pass_yds', 'Pass Yards'], ['player_reception_yds', 'Receiving Yards'], ['player_rush_yds', 'Rush Yards'], ['player_receptions', 'Receptions']],
+  basketball: [['player_points', 'Points'], ['player_rebounds', 'Rebounds'], ['player_assists', 'Assists'], ['player_threes', 'Threes'], ['player_points_rebounds_assists', 'PRA']],
+  baseball: [['batter_home_runs', 'Home Runs'], ['batter_hits', 'Hits'], ['batter_total_bases', 'Total Bases'], ['batter_rbis', 'RBIs'], ['pitcher_strikeouts', 'Strikeouts']],
+  icehockey: [['player_goal_scorer_anytime', 'Goals'], ['player_points', 'Points'], ['player_shots_on_goal', 'Shots'], ['player_assists', 'Assists']],
+};
+const ladderKinds = () => LADDER_KINDS[(state.sport || '').split('_')[0]] || [];
+const LADDER_FRESH_MS = 2 * 60 * 1000; // same as the server's shared cache
+state.view = store('pr_view') === 'market' ? 'market' : 'game';
+state.ladders = new Map();   // "eventId|kind" -> { data } | { loading } | { error }
+state.openGames = new Set(); // games opened in the market view
+state.seeAll = new Set();    // "eventId|kind" showing every player
+
+function setView(view) {
+  state.view = view;
+  store('pr_view', view);
+  $('#view-game').setAttribute('aria-selected', String(view === 'game'));
+  $('#view-market').setAttribute('aria-selected', String(view === 'market'));
+  $('#by-game').hidden = view !== 'game';
+  $('#by-market').hidden = view !== 'market';
+  if (view === 'market') renderMarketView();
+  else if (state.event && !state.props && typeof loadProps === 'function' && state.market) loadProps();
+}
+$('#view-game').addEventListener('click', () => setView('game'));
+$('#view-market').addEventListener('click', () => setView('market'));
+setView(state.view);
+
+function currentKind() {
+  const kinds = ladderKinds();
+  const saved = store(`pr_kind_${state.sport}`);
+  return kinds.some(([k]) => k === saved) ? saved : kinds[0]?.[0];
+}
+
+async function loadLadder(eventId, kind, { force = false } = {}) {
+  const id = `${eventId}|${kind}`;
+  const have = state.ladders.get(id);
+  if (!force && (have?.loading || (have?.data && Date.now() - have.at < LADDER_FRESH_MS))) return;
+  const sport = state.sport;
+  state.ladders.set(id, { loading: true, data: have?.data });
+  renderMarketView();
+  try {
+    const data = await api(`/api/ladder?sport=${sport}&event=${encodeURIComponent(eventId)}&kind=${kind}`);
+    state.ladders.set(id, { data, at: Date.now() });
+  } catch (ex) {
+    state.ladders.set(id, { error: ex.message });
+  }
+  if (state.sport === sport) renderMarketView();
+}
+
+function toggleMarketGame(e) {
+  if (state.openGames.has(e.id)) state.openGames.delete(e.id);
+  else { state.openGames.add(e.id); loadLadder(e.id, currentKind()); }
+  renderMarketView();
+}
+
+function ladderCell(e, rung, showTop = true) {
+  if (!rung) return el('span', { class: 'mk-cell none', 'aria-hidden': 'true' }, '—');
+  return el('button', {
+    class: 'mk-cell', type: 'button',
+    'data-event': e.id, 'data-market': rung.market, 'data-key': rung.key,
+    'aria-label': `Add ${rung.label} ${fmtOdds(rung.price)}`,
+    onclick: () => addLadderLeg(e, rung),
+  }, showTop && rung.top ? el('span', { class: 'mk-top' }, rung.top) : null, el('span', { class: 'mk-price' }, fmtOdds(rung.price)));
+}
+
+function ladderBody(e, kind) {
+  const id = `${e.id}|${kind}`;
+  const st = state.ladders.get(id);
+  if (!st || (st.loading && !st.data)) return el('p', { class: 'muted small mk-msg' }, 'Loading FanDuel odds…');
+  if (st.error) return el('p', { class: 'muted small mk-msg' }, st.error);
+  const d = st.data;
+  if (!d.players.length) return el('p', { class: 'muted small mk-msg' }, `FanDuel isn't offering ${d.marketLabel} for this game yet.`);
+  const all = state.seeAll.has(id);
+  const shown = all ? d.players : d.players.slice(0, 3);
+  let rows;
+  if (d.type === 'columns') {
+    const cols = d.columns;
+    const grid = { style: `grid-template-columns: minmax(88px, 1fr) repeat(${cols.length}, 58px)` };
+    // One scroll area for header + rows, so columns stay lined up if there are more than fit.
+    rows = el('div', { class: 'mk-cols' },
+      el('div', { class: 'mk-cols-head', ...grid }, el('span'), cols.map((c) => el('span', {}, c.toUpperCase()))),
+      shown.map((p) => el('div', { class: 'mk-cols-row', ...grid },
+        el('span', { class: 'mk-player' }, p.name),
+        cols.map((c) => ladderCell(e, p.cells[c], false)))));
+  } else {
+    rows = shown.map((p) => el('div', { class: 'mk-row' },
+      el('span', { class: 'mk-player' }, p.name),
+      el('div', { class: 'mk-rungs' }, p.rungs.map((r) => ladderCell(e, r)))));
+  }
+  const more = d.players.length > 3
+    ? el('button', {
+      class: 'link-btn mk-seeall', type: 'button',
+      onclick: () => { if (all) state.seeAll.delete(id); else state.seeAll.add(id); renderMarketView(); },
+    }, all ? 'Show less' : `See all (${d.players.length})`)
+    : null;
+  return el('div', { class: 'mk-body' }, rows, more);
+}
+
+function renderMarketView() {
+  const box = $('#by-market');
+  if (state.view !== 'market' || box.hidden) return;
+  const kinds = ladderKinds();
+  const kind = currentKind();
+  const events = state.events || [];
+  if (!kinds.length) { box.replaceChildren(el('p', { class: 'muted small' }, 'No player markets for this sport yet.')); return; }
+
+  const kindChips = el('div', { class: 'chips scroll', role: 'tablist', 'aria-label': 'Category' },
+    kinds.map(([k, label]) => el('button', {
+      class: 'chip', type: 'button', role: 'tab', 'aria-selected': String(k === kind),
+      onclick: () => {
+        store(`pr_kind_${state.sport}`, k);
+        state.openGames.forEach((id) => loadLadder(id, k)); // open games switch category too
+        renderMarketView();
+      },
+    }, label)));
+
+  if (!events.length) {
+    box.replaceChildren(kindChips, el('p', { class: 'muted small' }, 'No upcoming games on FanDuel for this sport.'));
+    return;
+  }
+  const days = [...new Set(events.map((e) => dayKey(e.commence)))];
+  if (!days.includes(state.gameDay)) state.gameDay = days[0];
+  const dayTabs = el('div', { class: 'day-tabs chips scroll', role: 'tablist', 'aria-label': 'Game day' },
+    days.map((d) => el('button', {
+      class: 'chip day-chip', type: 'button', role: 'tab', 'aria-selected': String(d === state.gameDay),
+      onclick: () => { state.gameDay = d; renderMarketView(); },
+    }, dayLabel(d), el('span', { class: 'day-count' }, String(events.filter((e) => dayKey(e.commence) === d).length)))));
+
+  const games = events.filter((e) => dayKey(e.commence) === state.gameDay);
+  const sections = games.map((e) => {
+    const open = state.openGames.has(e.id);
+    return el('section', { class: `mk-game${open ? ' open' : ''}` },
+      el('button', { class: 'mk-head', type: 'button', 'aria-expanded': String(open), onclick: () => toggleMarketGame(e) },
+        el('span', { class: 'mk-teams' },
+          el('span', { class: 'mk-team' }, teamBadge(e.away, 'sm'), shortName(e.away)),
+          el('span', { class: 'muted' }, '@'),
+          el('span', { class: 'mk-team' }, teamBadge(e.home, 'sm'), shortName(e.home))),
+        el('span', { class: `mk-time${new Date(e.commence) <= new Date() ? ' started' : ''}` }, gameTime(e.commence)),
+        el('span', { class: 'caret', 'aria-hidden': 'true' }, '▾')),
+      open ? ladderBody(e, kind) : null);
+  });
+
+  box.replaceChildren(kindChips, dayTabs,
+    el('p', { class: 'muted small mk-hint' }, 'Tap a game to see its odds.'),
+    el('div', { class: 'mk-list' }, sections));
+  markLadderAdded();
+}
+
+// ✓ on boxes already on the slip that "Add props to" points at.
+function markLadderAdded() {
+  const target = state.slips.find((s) => s.id === state.addSlipId) || currentSlip();
+  const on = new Set((target?.legs || []).map((l) => `${l.eventId}|${l.market}|${l.key}`));
+  document.querySelectorAll('.mk-cell[data-key]').forEach((c) => {
+    const added = on.has(`${c.dataset.event}|${c.dataset.market}|${c.dataset.key}`);
+    c.classList.toggle('added', added);
+    c.setAttribute('aria-pressed', String(added));
+  });
+}
+
+async function addLadderLeg(e, rung) {
+  const target = state.slips.find((s) => s.id === state.addSlipId) || currentSlip();
+  if (!target) return toast('Make a slip first.');
+  try {
+    const { leg } = await groupApi(`/slips/${target.id}/legs`, { method: 'POST', body: { sport: state.sport, eventId: e.id, market: rung.market, key: rung.key } });
+    toast(`Added ${leg?.label || rung.label} to ${target.name}`);
+  } catch (ex) { toast(ex.message); }
+  loadLegs(false);
 }
 
 const sportMarkets = () => state.sports.find((s) => s.key === state.sport)?.markets || [];
@@ -1464,7 +1655,7 @@ async function boot() {
 document.addEventListener('visibilitychange', () => {
   if (!state.groupId || $('#app').hidden) return;
   if (document.hidden) return;
-  loadLegs(false);
+  loadLegs('auto');
   if (!live) connectLive();
 });
 // Phones restoring the page from memory (back button, app switcher) don't always fire visibilitychange.
