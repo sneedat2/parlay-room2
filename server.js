@@ -566,16 +566,16 @@ function sgoToOddsShape(e, sport) {
       } else if (o.betTypeID === 'sp') {
         const team = teamName(o.sideID);
         push(`spreads${suffix}`, { name: team, point: num(fd.spread), price, link: fd.deeplink });
-        for (const a of alts) push(`alternate_spreads${suffix}`, { name: team, point: num(a.spread), price: num(a.odds) });
+        for (const a of alts) push(`alternate_spreads${suffix}`, { name: team, point: num(a.spread), price: num(a.odds), link: a.deeplink });
       } else if (o.betTypeID === 'ou') {
         const side = o.sideID === 'over' ? 'Over' : 'Under';
         if (o.statEntityID === 'all') {
           push(`totals${suffix}`, { name: side, point: num(fd.overUnder), price, link: fd.deeplink });
-          for (const a of alts) push(`alternate_totals${suffix}`, { name: side, point: num(a.overUnder), price: num(a.odds) });
+          for (const a of alts) push(`alternate_totals${suffix}`, { name: side, point: num(a.overUnder), price: num(a.odds), link: a.deeplink });
         } else {
           const team = teamName(o.statEntityID);
           push(`team_totals${suffix}`, { name: side, description: team, point: num(fd.overUnder), price, link: fd.deeplink });
-          for (const a of alts) push(`alternate_team_totals${suffix}`, { name: side, description: team, point: num(a.overUnder), price: num(a.odds) });
+          for (const a of alts) push(`alternate_team_totals${suffix}`, { name: side, description: team, point: num(a.overUnder), price: num(a.odds), link: a.deeplink });
         }
       }
       continue;
@@ -596,7 +596,8 @@ function sgoToOddsShape(e, sport) {
       if (side !== 'Over') continue; // FanDuel's milestone ladders (40+, 50+) are overs
       // "2+ TDs", "3+ TDs" belong with the main Total TDs lines; other stats get a milestone market.
       const altKey = market === 'player_tds_over' ? market : `${market}_alternate`;
-      for (const a of alts) push(altKey, { name: 'Over', description: player, point: num(a.overUnder), price: num(a.odds) });
+      // Alt lines carry their own betslip link when FanDuel gives one (docs: altLines[i].deeplink).
+      for (const a of alts) push(altKey, { name: 'Over', description: player, point: num(a.overUnder), price: num(a.odds), link: a.deeplink });
     }
   }
 
