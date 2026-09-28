@@ -294,6 +294,16 @@
             <button id="clear" class="btn danger-ghost" type="button" hidden>Clear slip</button>
             <button id="delete-slip" class="btn danger-ghost" type="button" hidden>Delete slip</button>
           </div>
+          <!-- Reliable fallback: FanDuel's one-leg links, tapped one after another, build the betslip -->
+          <div id="leg-links" class="leg-links" hidden>
+            <button id="leg-links-toggle" class="leg-links-toggle" type="button" aria-expanded="false" aria-controls="leg-links-panel">
+              Add legs to FanDuel one at a time <span class="caret" aria-hidden="true">▾</span>
+            </button>
+            <div id="leg-links-panel" class="leg-links-panel" hidden>
+              <p class="muted small">If FanDuel only shows some legs, tap each one here in order. FanDuel adds it to your betslip; come back for the next.</p>
+              <ol id="leg-links-list" class="leg-links-list"></ol>
+            </div>
+          </div>
           <div id="placed" class="placed" hidden>
             <button id="placed-toggle" class="placed-chip" type="button" aria-expanded="false" aria-controls="placed-panel">
               Placed · <span id="placed-count">0</span> <span class="caret" aria-hidden="true">▾</span>

@@ -709,6 +709,7 @@ function renderSlip() {
   renderBoost();
 
   renderPlaceBet(slip, data, live);
+  renderLegLinks(slip, live);
   renderPlaced(slip);
 
   const list = $('#legs');
@@ -838,7 +839,9 @@ function renderPlaceBet(slip, data, live) {
   const pb = slip.placeBet;
   const missing = pb.missing || [];
   if (pb.loadsSlip) {
-    note.textContent = `Opens ${book} with ${live.length === 1 ? 'this leg' : `all ${live.length} legs`} in your betslip.`;
+    note.textContent = live.length === 1
+      ? `Opens ${book} with this leg in your betslip.`
+      : `Tries to load all ${live.length} legs into your ${book} betslip. If some don't show up, use "Add legs to ${book} one at a time" below.`;
   } else if (data.demo) {
     note.textContent = `Demo odds have no betslip links, so this opens ${book} and you add the legs yourself. Add an odds API key to load them automatically.`;
   } else if (pb.linked) {
@@ -862,6 +865,54 @@ $('#place-bet').addEventListener('click', (e) => {
   // Show it right away; the live update confirms it a moment later.
   slip.placements = { ...(slip.placements || {}), [state.me.id]: { at: new Date().toISOString(), rev: slip.rev || 0 } };
   renderPlaced(slip);
+});
+
+// ---------------------------------------------------------------- one leg at a time
+// FanDuel reliably accepts single-leg betslip links and keeps what's already in the betslip,
+// so tapping each leg in turn builds the full parlay even when the all-in-one link comes up short.
+let legLinksOpen = false;
+const legLinksSent = new Map(); // slipId -> Set of leg ids already sent to FanDuel this session
+
+function renderLegLinks(slip, live) {
+  const box = $('#leg-links');
+  const withLinks = live.filter((l) => l.link);
+  box.hidden = live.length < 2 || !withLinks.length; // one leg: Place bet already is the single-leg link
+  if (box.hidden) return;
+  const sent = legLinksSent.get(slip.id) || new Set();
+  $('#leg-links-toggle').setAttribute('aria-expanded', String(legLinksOpen));
+  $('#leg-links-panel').hidden = !legLinksOpen;
+  $('#leg-links-list').replaceChildren(...live.map((leg) => {
+    const done = sent.has(leg.id);
+    const name = leg.player ? `${leg.label} ${leg.marketLabel}` : leg.label;
+    return el('li', { class: `leg-link-row${done ? ' done' : ''}` },
+      el('span', { class: 'leg-link-name' }, name, el('span', { class: 'muted' }, ` ${fmtOdds(leg.price)}`)),
+      leg.link
+        ? el('a', {
+          class: `btn sm ${done ? 'ghost' : 'primary'}`, href: leg.link, target: '_blank', rel: 'noopener',
+          onclick: () => sendLeg(slip, leg),
+        }, done ? 'Added ✓' : 'Add to FanDuel')
+        : el('span', { class: 'muted small' }, 'Add this one by hand'));
+  }));
+}
+
+function sendLeg(slip, leg) {
+  if (!legLinksSent.has(slip.id)) legLinksSent.set(slip.id, new Set());
+  const sent = legLinksSent.get(slip.id);
+  const first = !sent.size;
+  sent.add(leg.id);
+  // The first leg sent counts as heading to FanDuel from this slip (same as tapping Place bet).
+  if (first) {
+    fetch(`/api/groups/${state.groupId}/slips/${slip.id}/placed`, {
+      method: 'POST', keepalive: true,
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${state.token}` },
+    }).catch(() => {});
+  }
+  setTimeout(() => renderSlip(), 0); // after the link opens
+}
+
+$('#leg-links-toggle').addEventListener('click', () => {
+  legLinksOpen = !legLinksOpen;
+  if (state.slipData) renderSlip();
 });
 
 // ---------------------------------------------------------------- "Placed" list

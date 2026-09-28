@@ -134,6 +134,18 @@ input, select {
 .leg-cap { margin: 4px 0 0; font-size: 13px; font-weight: 600; color: var(--muted); }
 .leg-cap.full { color: var(--stub); }
 
+/* Add legs to FanDuel one at a time */
+.leg-links { margin-top: 10px; }
+.leg-links-toggle { background: none; border: 0; padding: 4px 0; color: var(--accent); font-weight: 600; font-size: 14px; cursor: pointer; }
+.leg-links-toggle[aria-expanded="true"] .caret { display: inline-block; transform: rotate(180deg); }
+.leg-links-panel { margin-top: 6px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface-2); padding: 8px 12px 10px; }
+.leg-links-panel > p { margin: 0 0 6px; }
+.leg-links-list { margin: 0; padding-left: 20px; display: flex; flex-direction: column; gap: 6px; }
+.leg-link-row { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 6px 10px; padding: 4px 0; }
+.leg-link-row::marker { font-weight: 600; color: var(--muted); }
+.leg-link-name { font-weight: 600; font-size: 14px; }
+.leg-link-row.done .leg-link-name { color: var(--muted); }
+
 /* "Placed" list under Place bet */
 .placed { margin-top: 8px; }
 .placed-chip {
