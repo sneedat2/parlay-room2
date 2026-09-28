@@ -386,8 +386,16 @@ async function oddsApi(pathname, params = {}, ttlSeconds = CACHE_SECONDS, force 
   }
   if (!res.ok) {
     const body = await res.text();
-    const err = new Error(`Odds API ${res.status}: ${body.slice(0, 200)}`);
-    err.status = res.status === 401 ? 502 : res.status === 429 ? 429 : 502;
+    console.error(`Odds API ${res.status}: ${body.slice(0, 200)}`);
+    // Tell people what's actually wrong instead of showing no odds.
+    const message = /OUT_OF_USAGE_CREDITS/.test(body)
+      ? "The odds service is out of credits for this month, so odds can't load. The group's owner needs to add credits or switch odds source."
+      : res.status === 401
+        ? "The odds service rejected the app's key. The group's owner needs to check the odds API key in the app's settings."
+        : res.status === 429 ? 'Odds are busy right now. Try again in a minute.'
+          : res.status === 404 ? "That game isn't on FanDuel anymore." : "Couldn't load odds right now. Try again in a minute.";
+    const err = new Error(message);
+    err.status = res.status === 429 ? 429 : res.status === 404 ? 404 : 502;
     throw err;
   }
   const data = await res.json();
@@ -1527,7 +1535,16 @@ async function repriceLegs(group, force) {
   await Promise.all([...groups.values()].map(async (legs) => {
     const { sport, eventId, market } = legs[0];
     let props;
-    try { props = await getProps(sport, eventId, market, { force }); } catch { return; }
+    try {
+      props = await getProps(sport, eventId, market, { force });
+    } catch (err) {
+      // The odds source doesn't know this game (it's over, or the leg came from a different odds
+      // source/demo). Its FanDuel code is dead, and one dead code can make FanDuel reject the whole
+      // betslip, so mark it pulled and leave it out of Place bet. Other errors are temporary: keep it.
+      const gone = err.status === 404 || String(eventId).startsWith('demo-') !== DEMO;
+      if (gone) for (const leg of legs) if (!leg.unavailable) { leg.unavailable = true; changed = true; }
+      return;
+    }
     for (const leg of legs) {
       const o = props.outcomes.find((x) => x.key === leg.key);
       if (!o) { if (!leg.unavailable) { leg.unavailable = true; changed = true; } continue; }
