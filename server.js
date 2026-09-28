@@ -13,7 +13,8 @@ try { webpush = require('web-push'); } catch { console.warn('web-push is not ins
 loadEnvFile(path.join(__dirname, '.env'));
 
 const PORT = Number(process.env.PORT) || 3000;
-const API_KEY = process.env.ODDS_API_KEY || '';
+// Keys are trimmed: a space or line break pasted along with a key makes it "not valid".
+const API_KEY = (process.env.ODDS_API_KEY || '').trim().replace(/^["']|["']$/g, '');
 // Optional: if set, creating a new group requires this code (keeps strangers off your API credits).
 const CREATE_CODE = process.env.GROUP_CREATE_CODE || '';
 const FANDUEL_STATE = (process.env.FANDUEL_STATE || '').toLowerCase();
@@ -32,7 +33,7 @@ const STORAGE_TEMPORARY = ON_RAILWAY && !VOLUME_DIR;
 const PUBLIC_DIR = path.join(__dirname, 'public');
 // Where odds come from: SportsGameOdds ("sgo") or The Odds API ("oddsapi").
 // Default: SportsGameOdds when its key is set, otherwise The Odds API. ODDS_PROVIDER forces one.
-const SGO_KEY = process.env.SGO_API_KEY || '';
+const SGO_KEY = (process.env.SGO_API_KEY || '').trim().replace(/^["']|["']$/g, '');
 const PROVIDER = (process.env.ODDS_PROVIDER || (SGO_KEY ? 'sgo' : 'oddsapi')).toLowerCase() === 'sgo' ? 'sgo' : 'oddsapi';
 const SGO = PROVIDER === 'sgo';
 const DEMO = SGO ? !SGO_KEY : !API_KEY;
@@ -396,6 +397,7 @@ async function oddsApi(pathname, params = {}, ttlSeconds = CACHE_SECONDS, force 
           : res.status === 404 ? "That game isn't on FanDuel anymore." : "Couldn't load odds right now. Try again in a minute.";
     const err = new Error(message);
     err.status = res.status === 429 ? 429 : res.status === 404 ? 404 : 502;
+    err.keyProblem = res.status === 401; // bad key or out of credits: retrying won't help for a while
     throw err;
   }
   const data = await res.json();
@@ -762,6 +764,10 @@ function parlayLink(legs) {
 
 const LINKS_FROM_ODDS_API = SGO && !DEMO && !!API_KEY;
 const CODE_RETRY_MS = 10 * 60 * 1000; // a leg that got no code is retried at most this often
+// When The Odds API rejects the key (not valid, or out of credits), stop asking for a while and
+// tell the slip why Place bet can't load legs, instead of failing silently.
+let codesProblem = null; // { message, until }
+const codesBlocked = () => !!codesProblem && codesProblem.until > Date.now();
 
 // The codes Place bet should use for a leg, or null if it has none that work.
 function betCodes(leg) {
@@ -836,10 +842,10 @@ async function lookUpCodes(leg) {
 
 // Give legs working betslip codes. Missing codes are retried now and then; force = fetch again for all.
 async function attachCodes(legs, { force = false } = {}) {
-  if (!LINKS_FROM_ODDS_API) return false;
+  if (!LINKS_FROM_ODDS_API || codesBlocked()) return false;
   let changed = false;
   await Promise.all(legs.map(async (leg) => {
-    if (leg.unavailable) return;
+    if (leg.unavailable || codesBlocked()) return;
     const tried = leg.fdTriedAt ? Date.now() - Date.parse(leg.fdTriedAt) : Infinity;
     if (!force && (leg.fd || tried < CODE_RETRY_MS)) return;
     leg.fdTriedAt = new Date().toISOString();
@@ -847,8 +853,18 @@ async function attachCodes(legs, { force = false } = {}) {
       const codes = await lookUpCodes(leg);
       if (codes && JSON.stringify(codes) !== JSON.stringify(leg.fd)) { leg.fd = codes; changed = true; }
       if (!codes) console.warn(`No FanDuel betslip code from The Odds API for "${leg.label}" (${leg.market}, ${leg.eventName}).`);
+      codesProblem = null;
     } catch (err) {
-      console.warn(`Couldn't get FanDuel betslip codes from The Odds API: ${err.message}`);
+      if (err.keyProblem) {
+        if (!codesBlocked()) console.warn(`Couldn't get FanDuel betslip codes from The Odds API (pausing 10 min): ${err.message}`);
+        const message = /credits/.test(err.message)
+          ? 'The Odds API (used for betslip links) is out of credits.'
+          : "The Odds API key (used for betslip links) isn't valid. The app's owner needs to fix ODDS_API_KEY.";
+        codesProblem = { message, until: Date.now() + CODE_RETRY_MS };
+        leg.fdTriedAt = null; // try this leg again as soon as the pause is over
+      } else {
+        console.warn(`Couldn't get FanDuel betslip codes from The Odds API: ${err.message}`);
+      }
     }
   }));
   return changed;
@@ -1364,6 +1380,7 @@ async function handleApi(req, res, url) {
             loadsSlip: !!link.url && !link.missing.length,
             linked: link.linked,
             missing: link.missing,
+            problem: link.missing.length && codesBlocked() ? codesProblem.message : null,
           },
         };
       }),
@@ -1685,6 +1702,9 @@ http.createServer(async (req, res) => {
   console.log(`Parlay Room running at http://localhost:${PORT}`);
   if (DEMO) console.log(`No ${SGO ? 'SGO_API_KEY' : 'ODDS_API_KEY'} set — using demo odds.`);
   else console.log(`Odds from ${SGO ? 'SportsGameOdds' : 'The Odds API'} (FanDuel).`);
+  if (LINKS_FROM_ODDS_API && API_KEY === SGO_KEY) {
+    console.warn('WARNING: ODDS_API_KEY is the same as SGO_API_KEY. ODDS_API_KEY needs your key from the-odds-api.com, not the SportsGameOdds key.');
+  }
   if (LINKS_FROM_ODDS_API) console.log('FanDuel betslip links from The Odds API.');
   else if (SGO && !DEMO) console.log("FanDuel betslip links from SportsGameOdds (add ODDS_API_KEY to use The Odds API's links instead).");
   console.log(`Saving data to ${DATA_FILE} (${db.members.length} accounts, ${db.groups.length} groups loaded).`);

@@ -864,6 +864,9 @@ function renderPlaceBet(slip, data, live) {
     note.textContent = live.length === 1
       ? `Opens ${book} with this leg in your betslip.`
       : `Tries to load all ${live.length} legs into your ${book} betslip. If some don't show up, use "Add legs to ${book} one at a time" below.`;
+  } else if (pb.problem) {
+    // The app's link source is down (bad key, no credits): say so, so it doesn't look broken.
+    note.textContent = `Can't load legs into ${book} right now: ${pb.problem} Until then this opens ${book} and you add ${missing.length === 1 ? 'the leg' : 'the legs'} yourself (use Game ↗).`;
   } else if (data.demo) {
     note.textContent = `Demo odds have no betslip links, so this opens ${book} and you add the legs yourself. Add an odds API key to load them automatically.`;
   } else if (pb.linked) {
