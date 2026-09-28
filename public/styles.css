@@ -130,6 +130,10 @@ input, select {
 .view-only { margin: 0 0 12px; padding: 10px 14px; border-radius: 10px; background: var(--surface); border-left: 4px solid var(--accent); font-size: 14px; box-shadow: var(--shadow); }
 @media (min-width: 900px) { .panels.single { grid-template-columns: minmax(0, 720px); justify-content: center; } }
 
+/* Free plan leg count on the slip */
+.leg-cap { margin: 4px 0 0; font-size: 13px; font-weight: 600; color: var(--muted); }
+.leg-cap.full { color: var(--stub); }
+
 /* "Placed" list under Place bet */
 .placed { margin-top: 8px; }
 .placed-chip {
@@ -411,6 +415,8 @@ input, select {
 .option .side { font-size: 14px; }
 .option .price { font: 700 20px/1 var(--display); font-variant-numeric: tabular-nums; }
 .option.added { border-color: var(--up); background: transparent; cursor: default; }
+/* Pro-only lines and markets on free accounts: visible, but dimmed */
+.option.locked, .mk-cell.locked, .chip.locked { opacity: 0.55; }
 .option.added .price::after { content: " ✓"; color: var(--up); }
 
 .toast {

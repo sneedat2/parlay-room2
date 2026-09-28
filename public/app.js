@@ -296,6 +296,7 @@ async function loadMe() {
   state.groups = data.groups;
   state.createNeedsCode = data.createNeedsCode;
   state.sportsbooks = data.sportsbooks;
+  state.freeLegs = data.limits?.freeLegs || 5;
   document.querySelectorAll('.storage-warning').forEach((p) => { p.hidden = !data.storageWarning; });
   $('#set-password-username').value = data.me.email || data.me.name;
   $('#demo-badge').hidden = !data.demo;
@@ -692,6 +693,18 @@ function renderSlip() {
     $('#parlay-odds').textContent = '—';
     $('#parlay-sub').textContent = 'No legs yet';
   }
+  // Free accounts: show how close the slip is to their leg limit.
+  const cap = $('#leg-cap');
+  cap.hidden = !!state.me?.pro;
+  if (!state.me?.pro) {
+    const full = legs.length >= state.freeLegs;
+    cap.textContent = !full
+      ? `${legs.length} of ${state.freeLegs} legs on the free plan`
+      : legs.length === state.freeLegs
+        ? `${legs.length} of ${state.freeLegs} legs · free limit reached. Pro members can add more.`
+        : `${legs.length} legs · free members can add up to ${state.freeLegs}. Pro members can add more.`;
+    cap.classList.toggle('full', full);
+  }
   state.parlayDec = live.length ? live.reduce((acc, l) => acc * toDecimal(l.price), 1) : null;
   renderBoost();
 
@@ -822,12 +835,17 @@ function renderPlaceBet(slip, data, live) {
   btn.href = slip.placeBet.url;
   btn.removeAttribute('aria-disabled');
   note.hidden = false;
-  if (slip.placeBet.loadsSlip) {
+  const pb = slip.placeBet;
+  const missing = pb.missing || [];
+  if (pb.loadsSlip) {
     note.textContent = `Opens ${book} with ${live.length === 1 ? 'this leg' : `all ${live.length} legs`} in your betslip.`;
   } else if (data.demo) {
-    note.textContent = `Demo odds have no betslip links, so this opens ${book} and you add the legs yourself. Add an Odds API key to load them automatically.`;
+    note.textContent = `Demo odds have no betslip links, so this opens ${book} and you add the legs yourself. Add an odds API key to load them automatically.`;
+  } else if (pb.linked) {
+    // Some legs load automatically; list the rest so nobody forgets them.
+    note.textContent = `Opens ${book} with ${pb.linked} of ${live.length} legs in your betslip. Add ${missing.length === 1 ? 'this one' : 'these'} yourself: ${missing.join(' · ')}`;
   } else {
-    note.textContent = `Some legs have no betslip link, so this opens ${book} and you add those yourself.`;
+    note.textContent = `${book} didn't give betslip links for these legs, so this opens ${book} and you add them yourself.`;
   }
 }
 
@@ -1031,7 +1049,7 @@ function renderSports() {
 async function selectSport(key) {
   state.sport = key;
   store('pr_sport', key);
-  state.market = sportMarkets()[0]?.key;
+  state.market = (sportMarkets().find((m) => !marketLocked(m.key)) || sportMarkets()[0])?.key;
   renderSports();
   renderMarkets();
   $('#find-status').textContent = 'Loading games…';
@@ -1230,12 +1248,13 @@ function toggleMarketGame(e) {
 
 function ladderCell(e, rung, showTop = true) {
   if (!rung) return el('span', { class: 'mk-cell none', 'aria-hidden': 'true' }, '—');
+  const locked = lineLocked(rung.market, rung.key);
   return el('button', {
-    class: 'mk-cell', type: 'button',
+    class: `mk-cell${locked ? ' locked' : ''}`, type: 'button',
     'data-event': e.id, 'data-market': rung.market, 'data-key': rung.key,
-    'aria-label': `Add ${rung.label} ${fmtOdds(rung.price)}`,
-    onclick: () => addLadderLeg(e, rung),
-  }, showTop && rung.top ? el('span', { class: 'mk-top' }, rung.top) : null, el('span', { class: 'mk-price' }, fmtOdds(rung.price)));
+    'aria-label': `${locked ? 'Pro only: ' : 'Add '}${rung.label} ${fmtOdds(rung.price)}`,
+    onclick: () => (locked ? proToast(marketLocked(rung.market) ? 'This market' : 'Alternate lines') : addLadderLeg(e, rung)),
+  }, showTop && rung.top ? el('span', { class: 'mk-top' }, rung.top) : null, el('span', { class: 'mk-price' }, locked ? `🔒 ${fmtOdds(rung.price)}` : fmtOdds(rung.price)));
 }
 
 function ladderBody(e, kind) {
@@ -1344,12 +1363,21 @@ async function addLadderLeg(e, rung) {
 
 const sportMarkets = () => state.sports.find((s) => s.key === state.sport)?.markets || [];
 
+// Free accounts can only add main lines of basic markets; the server enforces it too.
+const marketLocked = (market) => !state.me?.pro && !!sportMarkets().find((m) => m.key === market)?.pro;
+const lineLocked = (market, key) => !state.me?.pro && (marketLocked(market) || String(key).startsWith('alt:'));
+const proToast = (what) => toast(`${what} is a Parlay Room Pro feature.`);
+
 function renderMarkets() {
   for (const group of ['player', 'game']) {
     const chips = sportMarkets().filter((m) => m.group === group).map((m) => el('button', {
-      class: 'chip', type: 'button', role: 'tab', 'aria-selected': String(m.key === state.market),
-      onclick: () => { state.market = m.key; renderMarkets(); loadProps(); },
-    }, m.label));
+      class: `chip${marketLocked(m.key) ? ' locked' : ''}`, type: 'button', role: 'tab', 'aria-selected': String(m.key === state.market),
+      // Locked markets don't load, so free accounts don't spend API credits on lines they can't add.
+      onclick: () => {
+        if (marketLocked(m.key)) return proToast(m.label);
+        state.market = m.key; renderMarkets(); loadProps();
+      },
+    }, marketLocked(m.key) ? `🔒 ${m.label}` : m.label));
     const row = $(`#markets-${group}`);
     row.replaceChildren(...chips);
     row.parentElement.hidden = !chips.length;
@@ -1416,12 +1444,13 @@ function renderOutcomes() {
       : el('div', { class: 'player-name' }, name),
     el('div', { class: 'options' }, outs.map((o) => {
       const added = onSlip.has(o.key);
+      const locked = !added && lineLocked(p.market, o.key);
       const sideText = outcomeSide(p, o);
       return el('button', {
-        class: `option${added ? ' added' : ''}`, type: 'button', disabled: added,
-        'aria-label': `${added ? 'On slip: ' : 'Add '}${o.label} ${fmtOdds(o.price)}`,
-        onclick: () => addLeg(o),
-      }, el('span', { class: 'side' }, sideText), el('span', { class: 'price' }, fmtOdds(o.price)));
+        class: `option${added ? ' added' : ''}${locked ? ' locked' : ''}`, type: 'button', disabled: added,
+        'aria-label': `${added ? 'On slip: ' : locked ? 'Pro only: ' : 'Add '}${o.label} ${fmtOdds(o.price)}`,
+        onclick: () => (locked ? proToast('Alternate lines') : addLeg(o)),
+      }, el('span', { class: 'side' }, locked ? `🔒 ${sideText}` : sideText), el('span', { class: 'price' }, fmtOdds(o.price)));
     })))));
 }
 

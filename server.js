@@ -30,7 +30,12 @@ const DATA_FILE = (VOLUME_DIR && !(process.env.DATA_FILE || '').startsWith(VOLUM
 // Temporary = wiped whenever the app is updated or restarted.
 const STORAGE_TEMPORARY = ON_RAILWAY && !VOLUME_DIR;
 const PUBLIC_DIR = path.join(__dirname, 'public');
-const DEMO = !API_KEY;
+// Where odds come from: SportsGameOdds ("sgo") or The Odds API ("oddsapi").
+// Default: SportsGameOdds when its key is set, otherwise The Odds API. ODDS_PROVIDER forces one.
+const SGO_KEY = process.env.SGO_API_KEY || '';
+const PROVIDER = (process.env.ODDS_PROVIDER || (SGO_KEY ? 'sgo' : 'oddsapi')).toLowerCase() === 'sgo' ? 'sgo' : 'oddsapi';
+const SGO = PROVIDER === 'sgo';
+const DEMO = SGO ? !SGO_KEY : !API_KEY;
 
 // Email for password reset codes. Sent over HTTPS APIs (Railway blocks SMTP on Hobby plans).
 // Brevo works without owning a domain; Resend needs a verified domain to email anyone but you.
@@ -132,6 +137,28 @@ const SPORTS = [
   { key: 'icehockey_nhl', title: 'NHL', markets: HOCKEY },
 ];
 const sportByKey = (k) => SPORTS.find((s) => s.key === k);
+
+// ---------------------------------------------------------------- free vs Pro
+// Free accounts: 1 group (made or joined), no extra slips, and only the main line of these markets.
+// Everything else (alt lines, milestones like 250+ yds, first scorer, combos, halves...) is Pro.
+const FREE_MARKETS = new Set([
+  'h2h', 'spreads', 'totals',
+  'player_pass_yds', 'player_pass_tds', 'player_rush_yds', 'player_reception_yds', 'player_receptions', 'player_anytime_td',
+  'player_points', 'player_rebounds', 'player_assists', 'player_threes',
+  'batter_hits', 'batter_total_bases', 'batter_home_runs', 'batter_rbis', 'pitcher_strikeouts',
+  'player_goal_scorer_anytime', 'player_shots_on_goal', 'player_total_saves',
+]);
+const FREE_GROUP_LIMIT = 1;
+// Free accounts can't add (or move) a leg onto a slip that already has this many legs.
+const FREE_LEG_LIMIT = 5;
+const isProMarket = (market) => !FREE_MARKETS.has(market);
+// Until app store billing is hooked up, Pro = accounts listed in PRO_EMAILS, or marked plan: 'pro' in the data file.
+const PRO_EMAILS = new Set((process.env.PRO_EMAILS || '').split(',').map((e) => e.trim().toLowerCase()).filter(Boolean));
+// Testing phase: Pro limits are OFF unless PRO_LIMITS=on, so every account gets everything.
+const PRO_LIMITS_ON = String(process.env.PRO_LIMITS || '').toLowerCase() === 'on';
+const isPro = (m) => !PRO_LIMITS_ON || m.plan === 'pro' || (!!m.email && PRO_EMAILS.has(m.email));
+const groupCount = (m) => db.groups.filter((g) => g.memberIds.includes(m.id)).length;
+const proOnly = (res, what) => send(res, 403, { error: `${what} is a Parlay Room Pro feature.`, upgrade: true });
 
 // Sportsbooks a group can bet with. Odds and betslip links currently come from FanDuel only.
 const SPORTSBOOKS = [
@@ -368,8 +395,220 @@ async function oddsApi(pathname, params = {}, ttlSeconds = CACHE_SECONDS, force 
   return data;
 }
 
+// ---------------------------------------------------------------- SportsGameOdds
+// SportsGameOdds bills per event ("object") returned, with every market for that event included.
+// So one fetch fills every market for a game, and game lists also bring each game's odds with them.
+// Everything is translated into the same shape The Odds API returns, so the rest of the app is unchanged.
+
+const SGO_BASE = 'https://api.sportsgameodds.com/v2';
+const SGO_LEAGUE = {
+  americanfootball_nfl: 'NFL', americanfootball_ncaaf: 'NCAAF',
+  basketball_nba: 'NBA', basketball_wnba: 'WNBA', basketball_ncaab: 'NCAAB',
+  baseball_mlb: 'MLB', icehockey_nhl: 'NHL',
+};
+const SGO_LIST_MS = (Number(process.env.SGO_LIST_MINUTES) || 30) * 60 * 1000;   // how long a sport's game list is kept
+const SGO_EVENT_MS = (Number(process.env.SGO_EVENT_MINUTES) || 10) * 60 * 1000; // how long one game's odds are kept
+const sgoEvents = new Map();   // eventId -> { event, at }
+const sgoLists = new Map();    // sport -> { ids, at }
+const sgoInflight = new Map(); // request path -> promise, so simultaneous asks share one call
+const sgoBlocked = new Set();  // sports the plan doesn't include (hidden after the first "unavailable" answer)
+let sgoUsageAt = 0;
+
+async function sgoGet(path) {
+  if (sgoInflight.has(path)) return sgoInflight.get(path);
+  const run = (async () => {
+    const res = await fetch(SGO_BASE + path, { headers: { 'X-Api-Key': SGO_KEY } });
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok || body.success === false) {
+      const msg = body.error || body.message || `SportsGameOdds error ${res.status}`;
+      const err = new Error(res.status === 429 ? 'Odds are busy right now (too many requests). Try again in a minute.' : msg);
+      err.status = res.status === 429 ? 429 : res.status === 400 ? 400 : 502;
+      throw err;
+    }
+    sgoCheckUsage();
+    return body;
+  })().finally(() => sgoInflight.delete(path));
+  sgoInflight.set(path, run);
+  return run;
+}
+
+// Keep the "credits left" number current (their monthly object allowance). At most every 5 minutes.
+async function sgoCheckUsage() {
+  if (Date.now() - sgoUsageAt < 5 * 60 * 1000) return;
+  sgoUsageAt = Date.now();
+  try {
+    const res = await fetch(`${SGO_BASE}/account/usage/`, { headers: { 'X-Api-Key': SGO_KEY } });
+    const month = (await res.json()).data?.rateLimits?.['per-month'];
+    if (month && Number.isFinite(Number(month['max-entities']))) {
+      quota.used = Number(month['current-entities']) || 0;
+      quota.remaining = Number(month['max-entities']) - quota.used;
+    }
+  } catch { /* not critical */ }
+}
+
+const sgoOddsQuery = 'bookmakerID=fanduel&includeAltLines=true';
+
+async function sgoListEvents(sport) {
+  const league = SGO_LEAGUE[sport];
+  if (!league) return [];
+  const cached = sgoLists.get(sport);
+  if (!cached || Date.now() - cached.at > SGO_LIST_MS) {
+    const before = new Date(Date.now() + 8 * 864e5).toISOString(); // this week's games, not the whole season
+    const ids = [];
+    let cursor = '';
+    try {
+      for (let page = 0; page < 4; page++) {
+        const body = await sgoGet(`/events/?leagueID=${league}&oddsAvailable=true&startsBefore=${encodeURIComponent(before)}&limit=50&${sgoOddsQuery}${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`);
+        for (const e of body.data || []) {
+          sgoEvents.set(e.eventID, { event: e, at: Date.now() });
+          ids.push(e.eventID);
+        }
+        if (!body.nextCursor) break;
+        cursor = body.nextCursor;
+      }
+    } catch (err) {
+      if (/unavailable at your current subscription/i.test(err.message)) {
+        sgoBlocked.add(sport);
+        throw Object.assign(new Error(`${sportByKey(sport)?.title || league} isn't included in your SportsGameOdds plan.`), { status: 400 });
+      }
+      throw err;
+    }
+    sgoLists.set(sport, { ids, at: Date.now() });
+  }
+  return sgoLists.get(sport).ids.map((id) => sgoEvents.get(id)?.event).filter(Boolean);
+}
+
+// One game with all its FanDuel odds. force = "Update odds now" (skip the saved copy).
+async function sgoEvent(eventId, force = false) {
+  const have = sgoEvents.get(eventId);
+  if (!force && have && Date.now() - have.at < SGO_EVENT_MS) return have.event;
+  const body = await sgoGet(`/events/?eventID=${encodeURIComponent(eventId)}&${sgoOddsQuery}`);
+  const e = (body.data || [])[0];
+  if (!e) throw Object.assign(new Error('FanDuel no longer has odds for this game.'), { status: 404 });
+  sgoEvents.set(eventId, { event: e, at: Date.now() });
+  return e;
+}
+
+// statID (player props) -> this app's market key. Same stat names mean different things per sport.
+const SGO_PLAYER_STATS = {
+  americanfootball: {
+    passing_yards: 'player_pass_yds', passing_touchdowns: 'player_pass_tds', rushing_yards: 'player_rush_yds',
+    receiving_yards: 'player_reception_yds', receiving_receptions: 'player_receptions',
+    'rushing+receiving_yards': 'player_rush_reception_yds', 'passing+rushing_yards': 'player_pass_rush_yds',
+    firstTouchdown: 'player_1st_td', lastTouchdown: 'player_last_td',
+    touchdowns: { yn: 'player_anytime_td', ou: 'player_tds_over' },
+  },
+  basketball: {
+    points: 'player_points', rebounds: 'player_rebounds', assists: 'player_assists', threePointersMade: 'player_threes',
+    'points+rebounds+assists': 'player_points_rebounds_assists', 'points+rebounds': 'player_points_rebounds',
+    'points+assists': 'player_points_assists', doubleDouble: 'player_double_double', tripleDouble: 'player_triple_double',
+    firstBasket: 'player_first_basket', firstToScore: 'player_first_basket',
+  },
+  baseball: {
+    batting_hits: 'batter_hits', batting_totalBases: 'batter_total_bases', batting_homeRuns: 'batter_home_runs',
+    batting_RBI: 'batter_rbis', 'batting_hits+runs+rbi': 'batter_hits_runs_rbis', points: 'batter_runs_scored',
+    pitching_strikeouts: 'pitcher_strikeouts', pitching_outs: 'pitcher_outs', pitching_hits: 'pitcher_hits_allowed',
+    batting_firstHomeRun: 'batter_first_home_run',
+  },
+  icehockey: {
+    goals: 'player_goal_scorer_anytime', firstToScore: 'player_goal_scorer_first', points: { ou: 'player_points' },
+    shots_onGoal: 'player_shots_on_goal', assists: 'player_assists', goalie_saves: 'player_total_saves',
+  },
+};
+// periodID -> market key suffix ("spreads" + "_h1" = first-half spread).
+const SGO_PERIOD = {
+  game: '', '1h': '_h1', '2h': '_h2', '1q': '_q1', '2q': '_q2', '3q': '_q3', '4q': '_q4',
+  '1p': '_p1', '2p': '_p2', '3p': '_p3',
+  '1i': '_1st_1_innings', '1ix3': '_1st_3_innings', '1ix5': '_1st_5_innings', '1ix7': '_1st_7_innings',
+};
+
+// Translate one SportsGameOdds event into The Odds API's event shape (FanDuel only).
+function sgoToOddsShape(e, sport) {
+  const family = sport.split('_')[0];
+  const statMap = SGO_PLAYER_STATS[family] || {};
+  const home = e.teams?.home?.names?.long || 'Home';
+  const away = e.teams?.away?.names?.long || 'Away';
+  const teamName = (entity) => (entity === 'home' ? home : away);
+  const playerName = (o) => e.players?.[o.playerID || o.statEntityID]?.name
+    || String(o.marketName || '').replace(/\s+(Over\/Under|Yes\/No|To .*|Any .*)$/i, '').trim() || o.statEntityID;
+  const markets = new Map();
+  let lastUpdate = null;
+  const push = (key, outcome) => {
+    if (!markets.has(key)) markets.set(key, []);
+    markets.get(key).push(outcome);
+  };
+  const num = (v) => (v == null || v === '' ? null : Number(v));
+
+  for (const o of Object.values(e.odds || {})) {
+    const fd = o.byBookmaker?.fanduel;
+    if (!fd || fd.available === false) continue;
+    if (fd.lastUpdatedAt && (!lastUpdate || fd.lastUpdatedAt > lastUpdate)) lastUpdate = fd.lastUpdatedAt;
+    const price = num(fd.odds);
+    if (!Number.isFinite(price)) continue;
+    const alts = (fd.altLines || []).filter((a) => a.available !== false && Number.isFinite(num(a.odds)));
+    const isTeam = ['home', 'away', 'all'].includes(o.statEntityID);
+
+    if (isTeam) {
+      // Game lines: points ml / sp / ou, by period.
+      if (o.statID !== 'points') continue;
+      const suffix = SGO_PERIOD[o.periodID];
+      if (suffix == null) continue;
+      if (o.betTypeID === 'ml') {
+        push(`h2h${suffix}`, { name: teamName(o.sideID), price, link: fd.deeplink });
+      } else if (o.betTypeID === 'sp') {
+        const team = teamName(o.sideID);
+        push(`spreads${suffix}`, { name: team, point: num(fd.spread), price, link: fd.deeplink });
+        for (const a of alts) push(`alternate_spreads${suffix}`, { name: team, point: num(a.spread), price: num(a.odds) });
+      } else if (o.betTypeID === 'ou') {
+        const side = o.sideID === 'over' ? 'Over' : 'Under';
+        if (o.statEntityID === 'all') {
+          push(`totals${suffix}`, { name: side, point: num(fd.overUnder), price, link: fd.deeplink });
+          for (const a of alts) push(`alternate_totals${suffix}`, { name: side, point: num(a.overUnder), price: num(a.odds) });
+        } else {
+          const team = teamName(o.statEntityID);
+          push(`team_totals${suffix}`, { name: side, description: team, point: num(fd.overUnder), price, link: fd.deeplink });
+          for (const a of alts) push(`alternate_team_totals${suffix}`, { name: side, description: team, point: num(a.overUnder), price: num(a.odds) });
+        }
+      }
+      continue;
+    }
+
+    // Player props (full game only).
+    if (o.periodID !== 'game') continue;
+    let market = statMap[o.statID];
+    if (market && typeof market === 'object') market = market[o.betTypeID];
+    if (!market) continue;
+    const player = playerName(o);
+    if (o.betTypeID === 'yn') {
+      if (o.sideID !== 'yes') continue;
+      push(market, { name: 'Yes', description: player, price, link: fd.deeplink });
+    } else if (o.betTypeID === 'ou') {
+      const side = o.sideID === 'over' ? 'Over' : 'Under';
+      push(market, { name: side, description: player, point: num(fd.overUnder), price, link: fd.deeplink });
+      if (side !== 'Over') continue; // FanDuel's milestone ladders (40+, 50+) are overs
+      // "2+ TDs", "3+ TDs" belong with the main Total TDs lines; other stats get a milestone market.
+      const altKey = market === 'player_tds_over' ? market : `${market}_alternate`;
+      for (const a of alts) push(altKey, { name: 'Over', description: player, point: num(a.overUnder), price: num(a.odds) });
+    }
+  }
+
+  return {
+    id: e.eventID, home_team: home, away_team: away, commence_time: e.status?.startsAt,
+    bookmakers: [{
+      key: 'fanduel',
+      markets: [...markets].map(([key, outcomes]) => ({ key, last_update: lastUpdate, outcomes })),
+    }],
+  };
+}
+
 async function listEvents(sport) {
   if (DEMO) return demoEvents(sport);
+  if (SGO) {
+    return (await sgoListEvents(sport))
+      .map((e) => ({ id: e.eventID, home: e.teams?.home?.names?.long, away: e.teams?.away?.names?.long, commence: e.status?.startsAt }))
+      .filter((e) => e.commence)
+      .sort((a, b) => a.commence.localeCompare(b.commence));
+  }
   const events = await oddsApi(`/sports/${sport}/events`, {}, 300);
   return events
     .map((e) => ({ id: e.id, home: e.home_team, away: e.away_team, commence: e.commence_time }))
@@ -411,11 +650,22 @@ const ALT_MARKETS = new Set([
 ]);
 const altKey = (market) => (ALT_MARKETS.has(market) ? `${market}_alternate` : null);
 
+// SportsGameOdds: one saved, translated copy per game, shared by every market of that game.
+async function sgoShape(sport, eventId, force) {
+  await sgoEvent(eventId, force);
+  const entry = sgoEvents.get(eventId);
+  if (!entry.shape) entry.shape = sgoToOddsShape(entry.event, sport);
+  return entry.shape;
+}
+
 async function getProps(sport, eventId, market, { force = false } = {}) {
-  const alt = altKey(market);
+  // SportsGameOdds gives milestone lines for every player stat; The Odds API only for some.
+  const alt = SGO && !DEMO ? `${market}_alternate` : altKey(market);
   const raw = DEMO
     ? demoOdds(sport, eventId, market)
-    : await oddsApi(`/sports/${sport}/events/${eventId}/odds`, {
+    : SGO
+      ? await sgoShape(sport, eventId, force)
+      : await oddsApi(`/sports/${sport}/events/${eventId}/odds`, {
       regions: 'us',
       markets: alt ? `${market},${alt}` : market,
       bookmakers: 'fanduel',
@@ -464,9 +714,11 @@ async function getProps(sport, eventId, market, { force = false } = {}) {
   return { event, market, marketLabel: marketLabel(sport, market), lastUpdate, outcomes };
 }
 
-// One FanDuel URL that loads every leg into the betslip.
+// One FanDuel URL that loads every leg it can into the betslip.
+// Returns { url, linked, missing }: missing = legs FanDuel gave no betslip code for (added by hand).
 function parlayLink(legs) {
   const picks = [];
+  const missing = [];
   let origin = 'https://sportsbook.fanduel.com';
   for (const leg of legs) {
     let marketId = null, selectionId = null;
@@ -481,11 +733,12 @@ function parlayLink(legs) {
     marketId = marketId || leg.marketSid;
     selectionId = selectionId || leg.sid;
     if (marketId && selectionId) picks.push([marketId, selectionId]);
+    else missing.push(leg.player ? `${leg.label} ${leg.marketLabel}` : leg.label);
   }
-  if (!picks.length || picks.length !== legs.length) return null;
+  if (!picks.length) return { url: null, linked: 0, missing };
   const qs = picks.map(([m, s], i) =>
     `marketId[${i}]=${encodeURIComponent(m)}&selectionId[${i}]=${encodeURIComponent(s)}`).join('&');
-  return `${origin}/addToBetslip?${qs}`;
+  return { url: `${origin}/addToBetslip?${qs}`, linked: picks.length, missing };
 }
 
 // ---------------------------------------------------------------- HTTP plumbing
@@ -723,7 +976,8 @@ async function handleApi(req, res, url) {
   if (pathname === '/api/me') {
     const groups = db.groups.filter((g) => g.memberIds.includes(me.id)).map(groupView);
     return send(res, 200, {
-      me: { id: me.id, name: me.name, email: me.email || null, needsPassword: !!me.mustChangePassword },
+      me: { id: me.id, name: me.name, email: me.email || null, needsPassword: !!me.mustChangePassword, pro: isPro(me) },
+      limits: { freeLegs: FREE_LEG_LIMIT },
       groups, demo: DEMO, createNeedsCode: !!CREATE_CODE,
       // Only leaders need to know; they're the ones who can fix hosting.
       storageWarning: STORAGE_TEMPORARY && db.groups.some((g) => g.leaderId === me.id),
@@ -794,6 +1048,7 @@ async function handleApi(req, res, url) {
     const cleanName = String(name || '').trim().slice(0, 32);
     if (!cleanName) return send(res, 400, { error: 'Give the group a name.' });
     if (CREATE_CODE && createCode !== CREATE_CODE) return fail(403, 'That create code is wrong.');
+    if (!isPro(me) && groupCount(me) >= FREE_GROUP_LIMIT) return proOnly(res, 'Being in more than one group');
     const g = {
       id: newId(), name: cleanName, code: newInviteCode(), leaderId: me.id,
       memberIds: [me.id], slips: [newSlip('Main slip', me.id)], sportsbook: SPORTSBOOKS[0].key, createdAt: new Date().toISOString(),
@@ -812,7 +1067,10 @@ async function handleApi(req, res, url) {
     if ((g.bannedIds || []).includes(me.id)) {
       return send(res, 403, { error: 'The group leader removed you from this group. Ask them to let you back in.' });
     }
-    if (!g.memberIds.includes(me.id)) g.memberIds.push(me.id);
+    if (!g.memberIds.includes(me.id)) {
+      if (!isPro(me) && groupCount(me) >= FREE_GROUP_LIMIT) return proOnly(res, 'Being in more than one group');
+      g.memberIds.push(me.id);
+    }
     save();
     notifyGroup(g.id, 'members');
     return send(res, 200, { group: groupView(g) });
@@ -937,10 +1195,11 @@ async function handleApi(req, res, url) {
 
   if (pathname === '/api/sports') {
     let active = null;
-    if (!DEMO) {
+    if (!DEMO && !SGO) {
       try { active = new Set((await oddsApi('/sports', {}, 3600)).map((s) => s.key)); } catch { active = null; }
     }
-    const sports = SPORTS.filter((s) => (DEMO ? demoSports.has(s.key) : !active || active.has(s.key)));
+    const sports = SPORTS.filter((s) => (DEMO ? demoSports.has(s.key) : SGO ? !sgoBlocked.has(s.key) : !active || active.has(s.key)))
+      .map((s) => ({ ...s, markets: s.markets.map((m) => ({ ...m, pro: isProMarket(m.key) })) }));
     return send(res, 200, { sports, demo: DEMO });
   }
 
@@ -982,11 +1241,16 @@ async function handleApi(req, res, url) {
       oddsAt: group.oddsAt || null,
       oddsEveryMinutes: SLIP_ODDS_MINUTES,
       slips: group.slips.map((s) => {
-        const slipLink = parlayLink(s.legs.filter((l) => !l.unavailable));
+        const link = parlayLink(s.legs.filter((l) => !l.unavailable));
         return {
           ...s,
-          // Place bet: load the whole slip when every leg has a betslip link, else open the book.
-          placeBet: { url: slipLink || bookFor(group).home, loadsSlip: !!slipLink },
+          // Place bet: load every leg FanDuel gave a betslip code for; the rest are listed to add by hand.
+          placeBet: {
+            url: link.url || bookFor(group).home,
+            loadsSlip: !!link.url && !link.missing.length,
+            linked: link.linked,
+            missing: link.missing,
+          },
         };
       }),
       quota,
@@ -1007,6 +1271,7 @@ async function handleApi(req, res, url) {
 
   if (group && sub === '/slips' && req.method === 'POST') {
     if (!canEditGroup(group, me.id)) return send(res, 403, { error: LOCKED_MSG });
+    if (!isPro(me)) return proOnly(res, 'Making more slips');
     if (group.slips.length >= 20) return send(res, 400, { error: 'A group can have up to 20 slips. Delete one first.' });
     const { error, clean } = slipNameProblem((await readBody(req)).name);
     if (error) return send(res, 400, { error });
@@ -1069,9 +1334,12 @@ async function handleApi(req, res, url) {
     if (!canEditGroup(group, me.id)) return send(res, 403, { error: LOCKED_MSG });
     const { sport, eventId, market, key, note } = await readBody(req);
     if (!sportByKey(sport)) return send(res, 400, { error: 'Unknown sport.' });
+    if (!isPro(me) && isProMarket(market)) return proOnly(res, marketLabel(sport, market));
     const props = await getProps(sport, eventId, market);
     const o = props.outcomes.find((x) => x.key === key);
     if (!o) return send(res, 404, { error: 'FanDuel no longer offers that line. Refresh and try again.' });
+    if (!isPro(me) && o.alt) return proOnly(res, 'Alternate lines');
+    if (!isPro(me) && slip.legs.length >= FREE_LEG_LIMIT) return proOnly(res, `More than ${FREE_LEG_LIMIT} legs on a slip`);
     if (slip.legs.some((l) => l.eventId === eventId && l.market === market && l.key === key)) {
       return send(res, 409, { error: `That leg is already on ${slip.name}.` });
     }
@@ -1140,6 +1408,7 @@ async function handleApi(req, res, url) {
     const target = group.slips.find((s) => s.id === toSlipId);
     if (!target) return send(res, 404, { error: "That slip doesn't exist anymore." });
     if (target.id === slip.id) return send(res, 400, { error: `It's already on ${slip.name}.` });
+    if (!isPro(me) && target.legs.length >= FREE_LEG_LIMIT) return proOnly(res, `More than ${FREE_LEG_LIMIT} legs on a slip`);
     if (target.legs.some((l) => l.eventId === leg.eventId && l.market === leg.market && l.key === leg.key)) {
       return send(res, 409, { error: `${target.name} already has that leg.` });
     }
@@ -1177,10 +1446,14 @@ async function getLadder(sport, eventId, kind) {
   for (const [name, { milestones, main }] of byPlayer) {
     let rungs;
     if (milestones.length) {
-      // FanDuel-style ladder: 40+, 50+, 60+ ... low to high.
-      rungs = milestones
+      // Main line first (O 58.5 / U 58.5, which free accounts can add), then the ladder 40+, 50+, 60+ ... low to high.
+      const mainLine = main
+        .filter((o) => o.point != null)
+        .sort((a) => (a.side === 'Over' ? -1 : 1))
+        .map((o) => ({ ...cellOf(kind, o), top: `${o.side[0]} ${o.point}` }));
+      rungs = [...mainLine, ...milestones
         .sort((a, b) => parseFloat(a.side) - parseFloat(b.side))
-        .map((o) => ({ ...cellOf(kind, o), top: o.side }));
+        .map((o) => ({ ...cellOf(kind, o), top: o.side }))];
     } else {
       // No milestone lines: show the main line (Over/Under, or Yes).
       rungs = main.map((o) => ({ ...cellOf(kind, o), top: o.point != null ? `${o.side[0]} ${o.point}` : o.side }));
@@ -1279,8 +1552,10 @@ http.createServer(async (req, res) => {
   }
 }).listen(PORT, () => {
   console.log(`Parlay Room running at http://localhost:${PORT}`);
-  if (DEMO) console.log('No ODDS_API_KEY set — using demo odds.');
+  if (DEMO) console.log(`No ${SGO ? 'SGO_API_KEY' : 'ODDS_API_KEY'} set — using demo odds.`);
+  else console.log(`Odds from ${SGO ? 'SportsGameOdds' : 'The Odds API'} (FanDuel).`);
   console.log(`Saving data to ${DATA_FILE} (${db.members.length} accounts, ${db.groups.length} groups loaded).`);
+  console.log(PRO_LIMITS_ON ? 'Pro limits are ON (free accounts are limited).' : 'Pro limits are OFF: every account gets every feature (testing mode).');
   if (STORAGE_TEMPORARY) {
     console.warn('WARNING: No Railway volume is attached. Accounts, passwords and groups will be ERASED on every update or restart. Attach a volume to this service (any mount path, e.g. /data).');
   }
