@@ -19,7 +19,7 @@ const CREATE_CODE = process.env.GROUP_CREATE_CODE || '';
 const FANDUEL_STATE = (process.env.FANDUEL_STATE || '').toLowerCase();
 const CACHE_SECONDS = Number(process.env.ODDS_CACHE_SECONDS) || 120;
 // How often slip odds re-price on their own while someone has the group open (per group, not per person).
-const SLIP_ODDS_MINUTES = Number(process.env.SLIP_ODDS_MINUTES) || 5;
+const SLIP_ODDS_MINUTES = Number(process.env.SLIP_ODDS_MINUTES) || 10;
 // Where accounts, groups and slips are saved. On Railway this must be on an attached volume,
 // or every deploy starts from an empty file. Railway tells us the volume's path, so use it.
 const VOLUME_DIR = process.env.RAILWAY_VOLUME_MOUNT_PATH || '';
@@ -734,17 +734,18 @@ function parlayLink(legs) {
   const missing = [];
   let origin = 'https://sportsbook.fanduel.com';
   for (const leg of legs) {
+    const codes = betCodes(leg) || {};
     let marketId = null, selectionId = null;
-    if (leg.link) {
+    if (codes.link) {
       try {
-        const u = new URL(leg.link);
+        const u = new URL(codes.link);
         origin = u.origin;
         marketId = u.searchParams.get('marketId[0]') || u.searchParams.get('marketId');
         selectionId = u.searchParams.get('selectionId[0]') || u.searchParams.get('selectionId');
       } catch { /* ignore bad links */ }
     }
-    marketId = marketId || leg.marketSid;
-    selectionId = selectionId || leg.sid;
+    marketId = marketId || codes.marketSid;
+    selectionId = selectionId || codes.sid;
     if (marketId && selectionId) picks.push([marketId, selectionId]);
     else missing.push(leg.player ? `${leg.label} ${leg.marketLabel}` : leg.label);
   }
@@ -752,6 +753,105 @@ function parlayLink(legs) {
   const qs = picks.map(([m, s], i) =>
     `marketId[${i}]=${encodeURIComponent(m)}&selectionId[${i}]=${encodeURIComponent(s)}`).join('&');
   return { url: `${origin}/addToBetslip?${qs}`, linked: picks.length, missing };
+}
+
+// ---------------------------------------------------------------- FanDuel betslip codes (SGO + Odds API mix)
+// SportsGameOdds' FanDuel codes don't open FanDuel's betslip in every state, but The Odds API's do.
+// So with both keys set, SGO still supplies all the odds, and The Odds API is only asked for the
+// betslip codes of legs that are actually on a slip: about 1-2 credits per game+market, shared.
+
+const LINKS_FROM_ODDS_API = SGO && !DEMO && !!API_KEY;
+const CODE_RETRY_MS = 10 * 60 * 1000; // a leg that got no code is retried at most this often
+
+// The codes Place bet should use for a leg, or null if it has none that work.
+function betCodes(leg) {
+  if (!LINKS_FROM_ODDS_API) return leg.link || leg.sid ? { link: leg.link, sid: leg.sid, marketSid: leg.marketSid } : null;
+  return leg.fd || null; // SGO's own codes are left out: one bad code can make FanDuel drop the whole slip
+}
+
+// A single-leg "Bet in FanDuel" link.
+function legBetLink(leg) {
+  const c = betCodes(leg);
+  if (!c) return null;
+  if (c.link) return c.link;
+  if (c.marketSid && c.sid) {
+    return `https://sportsbook.fanduel.com/addToBetslip?marketId=${encodeURIComponent(c.marketSid)}&selectionId=${encodeURIComponent(c.sid)}`;
+  }
+  return null;
+}
+
+const plainName = (s) => String(s || '').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '')
+  .replace(/\b(jr|sr|ii|iii|iv|v)\b\.?/g, '').replace(/[^a-z0-9]+/g, ' ').trim();
+function sameTeam(a, b) {
+  a = plainName(a); b = plainName(b);
+  if (!a || !b) return false;
+  if (a === b || a.includes(b) || b.includes(a)) return true;
+  return a.split(' ').pop() === b.split(' ').pop(); // same nickname: "LA Chargers" / "Los Angeles Chargers"
+}
+function samePerson(a, b) {
+  a = plainName(a); b = plainName(b);
+  if (a === b) return true;
+  const [fa, ...ra] = a.split(' '), [fb, ...rb] = b.split(' ');
+  return !!fa && !!fb && ra.join(' ') === rb.join(' ') && fa[0] === fb[0]; // "Gabe Davis" / "Gabriel Davis"
+}
+
+// The Odds API's id for the leg's game (its game list is free and doesn't use credits).
+async function oddsApiGameFor(leg) {
+  const [away, home] = String(leg.eventName || '').split(' @ ');
+  const at = Date.parse(leg.commence);
+  const games = await oddsApi(`/sports/${leg.sport}/events`, {}, 600);
+  const match = games.find((g) => Math.abs(Date.parse(g.commence_time) - at) < 3 * 3600 * 1000
+    && sameTeam(g.home_team, home) && sameTeam(g.away_team, away));
+  return match ? { game: match, teams: [[home, match.home_team], [away, match.away_team]] } : null;
+}
+
+// Ask The Odds API for FanDuel's betslip codes for one leg. Returns null if it can't find the line.
+async function lookUpCodes(leg) {
+  const found = await oddsApiGameFor(leg);
+  if (!found) return null;
+  const { game, teams } = found;
+  const markets = ALT_MARKETS.has(leg.market) ? [leg.market, `${leg.market}_alternate`] : [leg.market];
+  const raw = await oddsApi(`/sports/${leg.sport}/events/${game.id}/odds`, {
+    regions: 'us', markets: markets.join(','), bookmakers: 'fanduel', oddsFormat: 'american',
+    includeLinks: 'true', includeSids: 'true',
+  }, CACHE_SECONDS);
+  const bk = (raw.bookmakers || []).find((b) => b.key === 'fanduel');
+  const [desc, name, point] = leg.key.replace(/^alt:/, '').split('|');
+  const isTeam = (s) => teams.some(([ours]) => ours && plainName(ours) === plainName(s));
+  const sameText = (ours, theirs) => {
+    if (!ours && !theirs) return true;
+    if (isTeam(ours)) return teams.some(([o, t]) => plainName(o) === plainName(ours) && sameTeam(t, theirs));
+    return plainName(ours) === plainName(theirs) || samePerson(ours, theirs);
+  };
+  for (const m of bk?.markets || []) {
+    for (const o of m.outcomes || []) {
+      if (!sameText(name, o.name) || !sameText(desc, o.description || '')) continue;
+      if ((point === '' ? null : Number(point)) !== (o.point ?? null)) continue;
+      const codes = { link: fixLink(o.link) || fixLink(m.link) || null, sid: o.sid || null, marketSid: m.sid || null };
+      return codes.link || (codes.sid && codes.marketSid) ? codes : null;
+    }
+  }
+  return null;
+}
+
+// Give legs working betslip codes. Missing codes are retried now and then; force = fetch again for all.
+async function attachCodes(legs, { force = false } = {}) {
+  if (!LINKS_FROM_ODDS_API) return false;
+  let changed = false;
+  await Promise.all(legs.map(async (leg) => {
+    if (leg.unavailable) return;
+    const tried = leg.fdTriedAt ? Date.now() - Date.parse(leg.fdTriedAt) : Infinity;
+    if (!force && (leg.fd || tried < CODE_RETRY_MS)) return;
+    leg.fdTriedAt = new Date().toISOString();
+    try {
+      const codes = await lookUpCodes(leg);
+      if (codes && JSON.stringify(codes) !== JSON.stringify(leg.fd)) { leg.fd = codes; changed = true; }
+      if (!codes) console.warn(`No FanDuel betslip code from The Odds API for "${leg.label}" (${leg.market}, ${leg.eventName}).`);
+    } catch (err) {
+      console.warn(`Couldn't get FanDuel betslip codes from The Odds API: ${err.message}`);
+    }
+  }));
+  return changed;
 }
 
 // ---------------------------------------------------------------- HTTP plumbing
@@ -1257,6 +1357,7 @@ async function handleApi(req, res, url) {
         const link = parlayLink(s.legs.filter((l) => !l.unavailable));
         return {
           ...s,
+          legs: s.legs.map(({ fd, fdTriedAt, ...leg }) => ({ ...leg, link: legBetLink({ ...leg, fd }) })),
           // Place bet: load every leg FanDuel gave a betslip code for; the rest are listed to add by hand.
           placeBet: {
             url: link.url || bookFor(group).home,
@@ -1369,6 +1470,7 @@ async function handleApi(req, res, url) {
       addedBy: me.id, addedAt: new Date().toISOString(),
       oddsAt: new Date().toISOString(), unavailable: false,
     };
+    await attachCodes([leg]); // working FanDuel betslip codes, so Place bet works right away
     slip.legs.push(leg);
     touchSlip(slip);
     save();
@@ -1562,6 +1664,8 @@ async function repriceLegs(group, force) {
       });
     }
   }));
+  // Betslip codes: fill in any that are missing; "Update odds now" fetches them all again.
+  if (await attachCodes(group.slips.flatMap((s) => s.legs), { force })) changed = true;
   group.oddsAt = new Date().toISOString();
   save();
   // Everyone else's screen reloads the slip (no extra credits) so they see the new odds and time.
@@ -1581,6 +1685,8 @@ http.createServer(async (req, res) => {
   console.log(`Parlay Room running at http://localhost:${PORT}`);
   if (DEMO) console.log(`No ${SGO ? 'SGO_API_KEY' : 'ODDS_API_KEY'} set — using demo odds.`);
   else console.log(`Odds from ${SGO ? 'SportsGameOdds' : 'The Odds API'} (FanDuel).`);
+  if (LINKS_FROM_ODDS_API) console.log('FanDuel betslip links from The Odds API.');
+  else if (SGO && !DEMO) console.log("FanDuel betslip links from SportsGameOdds (add ODDS_API_KEY to use The Odds API's links instead).");
   console.log(`Saving data to ${DATA_FILE} (${db.members.length} accounts, ${db.groups.length} groups loaded).`);
   console.log(PRO_LIMITS_ON ? 'Pro limits are ON (free accounts are limited).' : 'Pro limits are OFF: every account gets every feature (testing mode).');
   if (STORAGE_TEMPORARY) {

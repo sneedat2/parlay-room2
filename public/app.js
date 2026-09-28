@@ -367,13 +367,14 @@ function openGroup(id, showInvite = false) {
   renderGroupHeader();
   showScreen('app');
   showTab(store('pr_tab') || 'slip');
-  loadLegs('auto'); // only costs credits if the group's odds are over 5 minutes old
+  loadLegs('auto'); // only costs credits if the group's odds are over 10 minutes old
   if (!state.sports.length) loadSports().catch((ex) => { $('#find-status').textContent = ex.message; });
   else if (state.props) renderOutcomes();
   clearInterval(poll);
-  // Every 20s while the app is on screen: pick up slip changes, and let the server re-price odds
-  // once they're 5 minutes old (once per group, no matter how many people are looking).
-  poll = setInterval(() => { if (!document.hidden) loadLegs('auto'); }, 20000);
+  // Every 20s while the app is on screen: pick up slip changes (free), and let the server re-price
+  // odds once they're 10 minutes old (once per group, no matter how many people are looking).
+  // A screen nobody has touched for 10 minutes stops asking for new odds, to save API credits.
+  poll = setInterval(() => { if (!document.hidden) loadLegs(isIdle() ? false : 'auto'); }, 20000);
   connectLive();
   renderNotify();
 }
@@ -602,8 +603,22 @@ function showTab(name) {
 let legsRequested = 0; // newest request sent
 let legsShown = 0;     // newest request drawn on screen
 
+// No taps, typing or scrolling for this long = idle: odds stop updating on their own until someone's back.
+const IDLE_MS = 10 * 60 * 1000;
+let lastActive = Date.now();
+const isIdle = () => Date.now() - lastActive > IDLE_MS;
+function markActive() {
+  const wasIdle = isIdle();
+  lastActive = Date.now();
+  // Back after a break: catch up right away (costs credits only if the odds are old).
+  if (wasIdle && state.groupId && !$('#app').hidden && !document.hidden) loadLegs('auto');
+}
+for (const type of ['pointerdown', 'keydown', 'touchstart', 'wheel', 'scroll']) {
+  window.addEventListener(type, markActive, { passive: true, capture: true });
+}
+
 // fresh: false = just reload the slip (free)
-//        'auto' = also re-price legs if the group's odds are older than 5 minutes (the server decides)
+//        'auto' = also re-price legs if the group's odds are older than 10 minutes (the server decides)
 //        'force' = "Update odds now": brand-new odds from FanDuel
 async function loadLegs(fresh) {
   if (!state.groupId) return;
@@ -758,7 +773,7 @@ function renderSlip() {
 
   // How fresh the odds are, so nobody needs to tap Update unless they want to.
   $('#updated').textContent = data.oddsAt && state.slips.some((s) => s.legs.length)
-    ? `Odds from ${ago(data.oddsAt)} · auto every ${data.oddsEveryMinutes} min`
+    ? `Odds from ${ago(data.oddsAt)} · ${isIdle() ? 'auto-update paused (no activity)' : `auto every ${data.oddsEveryMinutes} min`}`
     : `Updated ${new Date(data.at).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}`;
   $('#quota').textContent = data.quota && data.quota.remaining != null ? `${data.quota.remaining} API credits left` : '';
   const confirming = !$('#slip-confirm').hidden;
@@ -1762,6 +1777,7 @@ async function boot() {
 document.addEventListener('visibilitychange', () => {
   if (!state.groupId || $('#app').hidden) return;
   if (document.hidden) return;
+  lastActive = Date.now(); // opening the app counts as activity
   loadLegs('auto');
   if (!live) connectLive();
 });
