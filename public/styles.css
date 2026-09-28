@@ -134,6 +134,18 @@ input, select {
 .leg-cap { margin: 4px 0 0; font-size: 13px; font-weight: 600; color: var(--muted); }
 .leg-cap.full { color: var(--stub); }
 
+/* Games on this slip: each game's FanDuel page */
+.slip-games { margin-top: 10px; display: flex; flex-direction: column; gap: 6px; }
+.slip-games-label { font-size: 12px; font-weight: 600; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); }
+.slip-games-list { display: flex; flex-wrap: wrap; gap: 6px; }
+.slip-game {
+  display: inline-flex; align-items: center; gap: 8px; min-height: 36px; padding: 0 12px; border-radius: 999px;
+  border: 1px solid var(--accent); color: var(--ink); text-decoration: none; font-weight: 600; font-size: 14px;
+}
+.slip-game:hover { background: var(--surface-2); }
+.slip-game-count { font-size: 12px; font-weight: 600; color: var(--muted); }
+.leg-link-actions { display: inline-flex; flex-wrap: wrap; gap: 6px; }
+
 /* Add legs to FanDuel one at a time */
 .leg-links { margin-top: 10px; }
 .leg-links-toggle { background: none; border: 0; padding: 4px 0; color: var(--accent); font-weight: 600; font-size: 14px; cursor: pointer; }

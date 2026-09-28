@@ -294,6 +294,12 @@
             <button id="clear" class="btn danger-ghost" type="button" hidden>Clear slip</button>
             <button id="delete-slip" class="btn danger-ghost" type="button" hidden>Delete slip</button>
           </div>
+          <!-- Fallback when betslip codes don't load: open each game's page on FanDuel -->
+          <div id="slip-games" class="slip-games" hidden>
+            <span class="slip-games-label">Games on this slip</span>
+            <div id="slip-games-list" class="slip-games-list"></div>
+          </div>
+
           <!-- Reliable fallback: FanDuel's one-leg links, tapped one after another, build the betslip -->
           <div id="leg-links" class="leg-links" hidden>
             <button id="leg-links-toggle" class="leg-links-toggle" type="button" aria-expanded="false" aria-controls="leg-links-panel">

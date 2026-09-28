@@ -604,6 +604,9 @@ function sgoToOddsShape(e, sport) {
     id: e.eventID, home_team: home, away_team: away, commence_time: e.status?.startsAt,
     bookmakers: [{
       key: 'fanduel',
+      // The game's page on FanDuel. Uses FanDuel's game number, not betslip codes, so it opens
+      // the right game even where the betslip codes don't work.
+      link: e.links?.bookmakers?.fanduel || null,
       markets: [...markets].map(([key, outcomes]) => ({ key, last_update: lastUpdate, outcomes })),
     }],
   };
@@ -687,6 +690,7 @@ async function getProps(sport, eventId, market, { force = false } = {}) {
   const event = {
     id: raw.id, home: raw.home_team, away: raw.away_team, commence: raw.commence_time,
     name: `${raw.away_team} @ ${raw.home_team}`,
+    link: fixLink(bk?.link) || null, // the game's page on FanDuel (fallback when betslip codes fail)
   };
 
   const toOutcome = (m, o, isAlt) => ({
@@ -1359,6 +1363,7 @@ async function handleApi(req, res, url) {
       key, label: o.label, player: o.player, side: o.side, point: o.point,
       price: o.price, priceAtAdd: o.price,
       link: o.link, sid: o.sid, marketSid: o.marketSid,
+      eventLink: props.event.link,
       note: String(note || '').trim().slice(0, 140),
       addedBy: me.id, addedAt: new Date().toISOString(),
       oddsAt: new Date().toISOString(), unavailable: false,
@@ -1549,7 +1554,11 @@ async function repriceLegs(group, force) {
       const o = props.outcomes.find((x) => x.key === leg.key);
       if (!o) { if (!leg.unavailable) { leg.unavailable = true; changed = true; } continue; }
       if (o.price !== leg.price || leg.unavailable || o.link !== leg.link) changed = true;
-      Object.assign(leg, { price: o.price, link: o.link, sid: o.sid, marketSid: o.marketSid, unavailable: false, oddsAt: new Date().toISOString() });
+      Object.assign(leg, {
+        price: o.price, link: o.link, sid: o.sid, marketSid: o.marketSid,
+        eventLink: props.event.link || leg.eventLink || null,
+        unavailable: false, oddsAt: new Date().toISOString(),
+      });
     }
   }));
   group.oddsAt = new Date().toISOString();

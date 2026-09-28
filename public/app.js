@@ -709,6 +709,7 @@ function renderSlip() {
   renderBoost();
 
   renderPlaceBet(slip, data, live);
+  renderSlipGames(live);
   renderLegLinks(slip, live);
   renderPlaced(slip);
 
@@ -744,6 +745,12 @@ function renderSlip() {
         el('span', { class: 'actions' },
           leg.link && !leg.unavailable
             ? el('a', { class: 'btn primary sm', href: leg.link, target: '_blank', rel: 'noopener' }, 'Bet in FanDuel')
+            : null,
+          leg.eventLink && !leg.unavailable
+            ? el('a', {
+              class: 'btn ghost sm', href: leg.eventLink, target: '_blank', rel: 'noopener',
+              'aria-label': `Open ${leg.eventName} in FanDuel`,
+            }, 'Game ↗')
             : null,
           moveTo,
           canRemove ? el('button', { class: 'btn ghost sm', type: 'button', onclick: () => removeLeg(slip, leg) }, 'Remove') : null))));
@@ -867,6 +874,24 @@ $('#place-bet').addEventListener('click', (e) => {
   renderPlaced(slip);
 });
 
+// ---------------------------------------------------------------- games on this slip
+// Each game's own page on FanDuel. It uses FanDuel's game number rather than betslip codes, so it
+// still gets you to the right game when betslip codes don't load (e.g. a different FanDuel region).
+function renderSlipGames(live) {
+  const games = new Map();
+  for (const leg of live) if (leg.eventLink && !games.has(leg.eventId)) games.set(leg.eventId, leg);
+  $('#slip-games').hidden = !games.size;
+  $('#slip-games-list').replaceChildren(...[...games.values()].map((leg) => {
+    const [away, home] = String(leg.eventName).split(' @ ');
+    const label = home ? `${shortName(away)} @ ${shortName(home)}` : leg.eventName;
+    const count = live.filter((l) => l.eventId === leg.eventId).length;
+    return el('a', {
+      class: 'slip-game', href: leg.eventLink, target: '_blank', rel: 'noopener',
+      'aria-label': `Open ${leg.eventName} in FanDuel (${count} leg${count === 1 ? '' : 's'})`,
+    }, `${label} ↗`, el('span', { class: 'slip-game-count' }, `${count} leg${count === 1 ? '' : 's'}`));
+  }));
+}
+
 // ---------------------------------------------------------------- one leg at a time
 // FanDuel reliably accepts single-leg betslip links and keeps what's already in the betslip,
 // so tapping each leg in turn builds the full parlay even when the all-in-one link comes up short.
@@ -886,12 +911,14 @@ function renderLegLinks(slip, live) {
     const name = leg.player ? `${leg.label} ${leg.marketLabel}` : leg.label;
     return el('li', { class: `leg-link-row${done ? ' done' : ''}` },
       el('span', { class: 'leg-link-name' }, name, el('span', { class: 'muted' }, ` ${fmtOdds(leg.price)}`)),
-      leg.link
-        ? el('a', {
-          class: `btn sm ${done ? 'ghost' : 'primary'}`, href: leg.link, target: '_blank', rel: 'noopener',
-          onclick: () => sendLeg(slip, leg),
-        }, done ? 'Added ✓' : 'Add to FanDuel')
-        : el('span', { class: 'muted small' }, 'Add this one by hand'));
+      el('span', { class: 'leg-link-actions' },
+        leg.link
+          ? el('a', {
+            class: `btn sm ${done ? 'ghost' : 'primary'}`, href: leg.link, target: '_blank', rel: 'noopener',
+            onclick: () => sendLeg(slip, leg),
+          }, done ? 'Added ✓' : 'Add to FanDuel')
+          : el('span', { class: 'muted small' }, 'Add this one by hand'),
+        leg.eventLink ? el('a', { class: 'btn ghost sm', href: leg.eventLink, target: '_blank', rel: 'noopener' }, 'Game ↗') : null));
   }));
 }
 
