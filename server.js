@@ -165,7 +165,109 @@ const PRO_LIMITS_ON = String(process.env.PRO_LIMITS || '').toLowerCase() === 'on
 const OWNER_EMAILS = new Set((process.env.OWNER_EMAIL || '').split(',').map((e) => e.trim().toLowerCase()).filter(Boolean));
 const isOwner = (m) => !!m?.email && OWNER_EMAILS.has(m.email);
 const proInApp = (email) => !!email && (db.proEmails || []).includes(email);
-const isPro = (m) => !PRO_LIMITS_ON || isOwner(m) || m.plan === 'pro' || (!!m.email && (PRO_EMAILS.has(m.email) || proInApp(m.email)));
+// Paid plan on/off: the owner's switch (saved in the data file) wins; PRO_LIMITS=on is only the starting value.
+const limitsOn = () => (typeof db.paidOn === 'boolean' ? db.paidOn : PRO_LIMITS_ON);
+// Paying through Stripe. past_due = card failed and Stripe is retrying; keep Pro during the retries.
+const paying = (m) => ['active', 'trialing', 'past_due'].includes(m.stripe?.status);
+const isPro = (m) => !limitsOn() || isOwner(m) || m.plan === 'pro' || paying(m)
+  || (!!m.email && (PRO_EMAILS.has(m.email) || proInApp(m.email)));
+
+// ---------------------------------------------------------------- payments (Stripe)
+// Pro is a Stripe subscription. Stripe hosts the card form (Checkout) and the manage/cancel page
+// (Customer Portal); Stripe tells the app about payments through a webhook. The price and billing
+// period are set on the Price in Stripe, so changing the price needs no code change.
+const STRIPE_SECRET_KEY = (process.env.STRIPE_SECRET_KEY || '').trim();
+const STRIPE_PRICE_ID = (process.env.STRIPE_PRICE_ID || '').trim();
+const STRIPE_WEBHOOK_SECRET = (process.env.STRIPE_WEBHOOK_SECRET || '').trim();
+const STRIPE_READY = !!(STRIPE_SECRET_KEY && STRIPE_PRICE_ID && STRIPE_WEBHOOK_SECRET);
+const APP_URL = (process.env.APP_URL || '').trim().replace(/\/+$/, '');
+
+// Stripe's API takes form fields, with nested ones written like line_items[0][price].
+async function stripe(pathname, params, method = 'POST') {
+  const body = params ? new URLSearchParams(params).toString() : undefined;
+  const res = await fetch(`https://api.stripe.com/v1${pathname}`, {
+    method,
+    headers: { Authorization: `Bearer ${STRIPE_SECRET_KEY}`, 'Content-Type': 'application/x-www-form-urlencoded' },
+    body,
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    console.error(`Stripe ${res.status}: ${data.error?.message || 'error'}`);
+    throw Object.assign(new Error("Payments aren't working right now. Try again in a minute."), { status: 502 });
+  }
+  return data;
+}
+
+// "$4.99/month", from the Price in Stripe (checked once an hour).
+let priceCache = { label: null, at: 0 };
+async function priceLabel() {
+  if (!STRIPE_READY) return null;
+  if (Date.now() - priceCache.at < 3600 * 1000) return priceCache.label;
+  priceCache.at = Date.now();
+  try {
+    const p = await stripe(`/prices/${encodeURIComponent(STRIPE_PRICE_ID)}`, null, 'GET');
+    const amount = new Intl.NumberFormat('en-US', { style: 'currency', currency: p.currency.toUpperCase() }).format(p.unit_amount / 100);
+    const every = p.recurring ? (p.recurring.interval_count > 1 ? `/${p.recurring.interval_count} ${p.recurring.interval}s` : `/${p.recurring.interval}`) : '';
+    priceCache.label = `${amount}${every}`;
+  } catch { priceCache.label = null; }
+  return priceCache.label;
+}
+
+// What the app shows about paying. Only says "can upgrade" when the owner has payments on and Stripe is set up.
+async function billingView(m) {
+  const on = limitsOn();
+  return {
+    paidOn: on,
+    canUpgrade: on && STRIPE_READY && !isPro(m),
+    price: on && STRIPE_READY ? await priceLabel() : null,
+    status: m.stripe?.status || null,
+    cancelsAt: m.stripe?.cancelAt || null,
+    canManage: STRIPE_READY && !!m.stripe?.customer, // Stripe's page to update the card or cancel
+    // Pro without paying: the owner, or someone the owner gave Pro.
+    giftedPro: on && isPro(m) && !paying(m),
+  };
+}
+
+// Stripe signs every webhook; anything that doesn't check out is ignored.
+function stripeSignatureOk(raw, header) {
+  const parts = String(header || '').split(',').map((p) => p.split('='));
+  const t = parts.find(([k]) => k === 't')?.[1];
+  const sigs = parts.filter(([k]) => k === 'v1').map(([, v]) => v);
+  if (!t || !sigs.length || Math.abs(Date.now() / 1000 - Number(t)) > 300) return false;
+  const expected = crypto.createHmac('sha256', STRIPE_WEBHOOK_SECRET).update(`${t}.`).update(raw).digest();
+  return sigs.some((s) => {
+    const got = Buffer.from(s, 'hex');
+    return got.length === expected.length && crypto.timingSafeEqual(got, expected);
+  });
+}
+
+function applySubscription(sub) {
+  const m = db.members.find((x) => x.id === sub.metadata?.memberId)
+    || db.members.find((x) => x.stripe?.customer && x.stripe.customer === sub.customer);
+  if (!m) return console.warn(`Stripe subscription ${sub.id} doesn't match any account.`);
+  const status = sub.status === 'incomplete_expired' ? 'canceled' : sub.status;
+  m.stripe = {
+    ...(m.stripe || {}),
+    customer: sub.customer,
+    subscription: sub.id,
+    status,
+    cancelAt: sub.cancel_at ? new Date(sub.cancel_at * 1000).toISOString() : null,
+  };
+  console.log(`Stripe: ${m.email || m.id} is now ${status}${m.stripe.cancelAt ? ` (cancels ${m.stripe.cancelAt.slice(0, 10)})` : ''}.`);
+}
+
+function readRaw(req, limit = 1024 * 1024) {
+  return new Promise((resolve, reject) => {
+    const chunks = [];
+    let size = 0;
+    req.on('data', (c) => {
+      size += c.length;
+      if (size > limit) { reject(Object.assign(new Error('Request too large'), { status: 413 })); req.destroy(); }
+      else chunks.push(c);
+    });
+    req.on('end', () => resolve(Buffer.concat(chunks)));
+  });
+}
 const groupCount = (m) => db.groups.filter((g) => g.memberIds.includes(m.id)).length;
 const proOnly = (res, what) => send(res, 403, { error: `${what} is a Parlay Room Pro feature.`, upgrade: true });
 
@@ -1107,8 +1209,73 @@ async function handleApi(req, res, url) {
     return openLiveStream(req, res, url.searchParams.get('ticket') || '');
   }
 
+  // Stripe → app: payment and subscription changes. No sign-in; Stripe's signature proves it's Stripe.
+  if (pathname === '/api/stripe/webhook' && req.method === 'POST') {
+    if (!STRIPE_READY) return send(res, 404, { error: 'Not found.' });
+    const raw = await readRaw(req);
+    if (!stripeSignatureOk(raw, req.headers['stripe-signature'])) return send(res, 400, { error: 'Bad signature.' });
+    let event;
+    try { event = JSON.parse(raw.toString('utf8')); } catch { return send(res, 400, { error: 'Invalid JSON' }); }
+    const obj = event.data?.object || {};
+    if (event.type === 'checkout.session.completed' && obj.mode === 'subscription') {
+      const m = db.members.find((x) => x.id === (obj.client_reference_id || obj.metadata?.memberId));
+      if (m) {
+        m.stripe = { ...(m.stripe || {}), customer: obj.customer, subscription: obj.subscription, status: m.stripe?.status || 'active' };
+        console.log(`Stripe: ${m.email || m.id} paid for Pro.`);
+      }
+    } else if (/^customer\.subscription\.(created|updated|deleted)$/.test(event.type)) {
+      applySubscription(obj);
+    }
+    save();
+    return send(res, 200, { received: true });
+  }
+
   const me = currentMember(req);
   if (!me) return send(res, 401, { error: 'Sign in first.' });
+
+  // ---- Paying for Pro
+  const appUrl = APP_URL || `${req.headers['x-forwarded-proto'] || 'http'}://${req.headers.host}`;
+  if (pathname === '/api/billing/checkout' && req.method === 'POST') {
+    if (!limitsOn() || !STRIPE_READY) return send(res, 400, { error: "Upgrading isn't available right now." });
+    if (isPro(me)) return send(res, 400, { error: 'You already have Pro.' });
+    const params = {
+      mode: 'subscription',
+      'line_items[0][price]': STRIPE_PRICE_ID,
+      'line_items[0][quantity]': '1',
+      client_reference_id: me.id,
+      'metadata[memberId]': me.id,
+      'subscription_data[metadata][memberId]': me.id,
+      success_url: `${appUrl}/?billing=success`,
+      cancel_url: `${appUrl}/?billing=cancel`,
+      allow_promotion_codes: 'true',
+    };
+    if (me.stripe?.customer) params.customer = me.stripe.customer; // came back after cancelling
+    else if (me.email) params.customer_email = me.email;
+    const session = await stripe('/checkout/sessions', params);
+    return send(res, 200, { url: session.url });
+  }
+  if (pathname === '/api/billing/portal' && req.method === 'POST') {
+    if (!STRIPE_READY || !me.stripe?.customer) return send(res, 400, { error: "There's no subscription to manage." });
+    const portal = await stripe('/billing_portal/sessions', { customer: me.stripe.customer, return_url: `${appUrl}/` });
+    return send(res, 200, { url: portal.url });
+  }
+
+  // ---- Owner screen: paid plan on/off. Off = everyone gets every feature and nobody is asked to pay.
+  if (pathname === '/api/owner/paid') {
+    if (!isOwner(me)) return send(res, 404, { error: 'Not found.' });
+    if (req.method === 'POST') {
+      db.paidOn = !!(await readBody(req)).on;
+      save();
+      console.log(db.paidOn ? 'Owner turned the paid plan ON (free accounts are limited).' : 'Owner turned the paid plan OFF (everyone gets every feature).');
+    }
+    return send(res, 200, {
+      on: limitsOn(),
+      ready: STRIPE_READY,
+      testMode: STRIPE_SECRET_KEY.startsWith('sk_test_') || STRIPE_SECRET_KEY.startsWith('rk_test_'),
+      price: STRIPE_READY ? await priceLabel() : null,
+      paying: db.members.filter(paying).length,
+    });
+  }
 
   // ---- Owner screen: switch live odds off/on (off = demo odds, no API credits used). Instant, no restart.
   if (pathname === '/api/owner/odds') {
@@ -1134,7 +1301,7 @@ async function handleApi(req, res, url) {
         fromRailway: PRO_EMAILS.has(email) && !db.proEmails.includes(email),
       }));
     };
-    if (req.method === 'GET') return send(res, 200, { people: list(), limitsOn: PRO_LIMITS_ON });
+    if (req.method === 'GET') return send(res, 200, { people: list(), limitsOn: limitsOn() });
     const email = normalizeEmail((await readBody(req)).email);
     if (!validEmail(email)) return send(res, 400, { error: 'Enter a valid email address.' });
     if (req.method === 'POST') {
@@ -1148,7 +1315,7 @@ async function handleApi(req, res, url) {
       return send(res, 405, { error: 'Not allowed.' });
     }
     save();
-    return send(res, 200, { people: list(), limitsOn: PRO_LIMITS_ON });
+    return send(res, 200, { people: list(), limitsOn: limitsOn() });
   }
 
   if (pathname === '/api/me') {
@@ -1156,6 +1323,7 @@ async function handleApi(req, res, url) {
     return send(res, 200, {
       me: { id: me.id, name: me.name, email: me.email || null, needsPassword: !!me.mustChangePassword, pro: isPro(me), owner: isOwner(me) },
       limits: { freeLegs: FREE_LEG_LIMIT },
+      billing: await billingView(me),
       groups, demo: isDemo(), createNeedsCode: !!CREATE_CODE,
       // Only leaders need to know; they're the ones who can fix hosting.
       storageWarning: STORAGE_TEMPORARY && db.groups.some((g) => g.leaderId === me.id),
@@ -1763,7 +1931,8 @@ http.createServer(async (req, res) => {
   console.log(EMAIL_ON
     ? `Forgot password emails ON: sent by ${BREVO_API_KEY ? 'Brevo' : 'Resend'} from ${MAIL_FROM}.`
     : 'Forgot password emails OFF: set BREVO_API_KEY and MAIL_FROM to turn them on.');
-  console.log(PRO_LIMITS_ON ? 'Pro limits are ON (free accounts are limited).' : 'Pro limits are OFF: every account gets every feature (testing mode).');
+  console.log(limitsOn() ? 'Paid plan is ON (free accounts are limited).' : 'Paid plan is OFF: every account gets every feature (testing mode).');
+  console.log(STRIPE_READY ? `Payments: Stripe ${STRIPE_SECRET_KEY.startsWith('sk_live_') ? 'LIVE' : 'test'} mode.` : 'Payments: not set up (add STRIPE_SECRET_KEY, STRIPE_PRICE_ID, STRIPE_WEBHOOK_SECRET).');
   if (STORAGE_TEMPORARY) {
     console.warn('WARNING: No Railway volume is attached. Accounts, passwords and groups will be ERASED on every update or restart. Attach a volume to this service (any mount path, e.g. /data).');
   }
