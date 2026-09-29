@@ -43,9 +43,9 @@ const isDemo = () => NO_KEY || !!db.oddsOff;
 
 // Email for password reset codes. Sent over HTTPS APIs (Railway blocks SMTP on Hobby plans).
 // Brevo works without owning a domain; Resend needs a verified domain to email anyone but you.
-const BREVO_API_KEY = process.env.BREVO_API_KEY || '';
-const RESEND_API_KEY = process.env.RESEND_API_KEY || '';
-const MAIL_FROM = process.env.MAIL_FROM || '';
+const BREVO_API_KEY = (process.env.BREVO_API_KEY || '').trim();
+const RESEND_API_KEY = (process.env.RESEND_API_KEY || '').trim();
+const MAIL_FROM = (process.env.MAIL_FROM || '').trim();
 const MAIL_FROM_NAME = process.env.MAIL_FROM_NAME || 'Parlay Room';
 const EMAIL_ON = !!((BREVO_API_KEY || RESEND_API_KEY) && MAIL_FROM);
 
@@ -1760,6 +1760,9 @@ http.createServer(async (req, res) => {
   if (linksFromOddsApi()) console.log('FanDuel betslip links from The Odds API.');
   else if (SGO && !isDemo()) console.log("FanDuel betslip links from SportsGameOdds (add ODDS_API_KEY to use The Odds API's links instead).");
   console.log(`Saving data to ${DATA_FILE} (${db.members.length} accounts, ${db.groups.length} groups loaded).`);
+  console.log(EMAIL_ON
+    ? `Forgot password emails ON: sent by ${BREVO_API_KEY ? 'Brevo' : 'Resend'} from ${MAIL_FROM}.`
+    : 'Forgot password emails OFF: set BREVO_API_KEY and MAIL_FROM to turn them on.');
   console.log(PRO_LIMITS_ON ? 'Pro limits are ON (free accounts are limited).' : 'Pro limits are OFF: every account gets every feature (testing mode).');
   if (STORAGE_TEMPORARY) {
     console.warn('WARNING: No Railway volume is attached. Accounts, passwords and groups will be ERASED on every update or restart. Attach a volume to this service (any mount path, e.g. /data).');
