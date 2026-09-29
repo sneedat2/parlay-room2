@@ -122,7 +122,9 @@ const BASEBALL = [
 const HOCKEY = [
   player('player_goal_scorer_anytime', 'Anytime Goal'),
   player('player_goal_scorer_first', 'First Goal'),
+  player('player_goals', 'Goals'),
   player('player_points', 'Points'),
+  player('player_power_play_points', 'Power Play Points'),
   player('player_shots_on_goal', 'Shots'),
   player('player_assists', 'Assists'),
   player('player_total_saves', 'Saves'),
@@ -631,8 +633,13 @@ const SGO_PLAYER_STATS = {
     batting_firstHomeRun: 'batter_first_home_run',
   },
   icehockey: {
-    goals: 'player_goal_scorer_anytime', firstToScore: 'player_goal_scorer_first', points: { ou: 'player_points' },
-    shots_onGoal: 'player_shots_on_goal', assists: 'player_assists', goalie_saves: 'player_total_saves',
+    // SportsGameOdds calls a hockey GOAL "points", and hockey points (goals + assists) "goals+assists".
+    points: { yn: 'player_goal_scorer_anytime', ou: 'player_goals' },
+    'goals+assists': { ou: 'player_points' },
+    'powerPlay_goals+assists': { ou: 'player_power_play_points' },
+    firstToScore: { yn: 'player_goal_scorer_first' },
+    // "Any assists / any shots" yes-no lines repeat the Over 0.5 line, so only the over/unders are used.
+    shots_onGoal: { ou: 'player_shots_on_goal' }, assists: { ou: 'player_assists' }, goalie_saves: { ou: 'player_total_saves' },
   },
 };
 // periodID -> market key suffix ("spreads" + "_h1" = first-half spread).
@@ -661,11 +668,14 @@ function sgoToOddsShape(e, sport) {
 
   for (const o of Object.values(e.odds || {})) {
     const fd = o.byBookmaker?.fanduel;
-    if (!fd || fd.available === false) continue;
-    if (fd.lastUpdatedAt && (!lastUpdate || fd.lastUpdatedAt > lastUpdate)) lastUpdate = fd.lastUpdatedAt;
+    if (!fd) continue;
     const price = num(fd.odds);
-    if (!Number.isFinite(price)) continue;
     const alts = (fd.altLines || []).filter((a) => a.available !== false && Number.isFinite(num(a.odds)));
+    // FanDuel pauses a main line (often during games) while some milestones stay open: show what's open.
+    const mainOpen = fd.available !== false && Number.isFinite(price);
+    if (!mainOpen && !alts.length) continue;
+    const main = mainOpen ? push : () => {};
+    if (fd.lastUpdatedAt && (!lastUpdate || fd.lastUpdatedAt > lastUpdate)) lastUpdate = fd.lastUpdatedAt;
     const isTeam = ['home', 'away', 'all'].includes(o.statEntityID);
 
     if (isTeam) {
@@ -674,19 +684,19 @@ function sgoToOddsShape(e, sport) {
       const suffix = SGO_PERIOD[o.periodID];
       if (suffix == null) continue;
       if (o.betTypeID === 'ml') {
-        push(`h2h${suffix}`, { name: teamName(o.sideID), price, link: fd.deeplink });
+        main(`h2h${suffix}`, { name: teamName(o.sideID), price, link: fd.deeplink });
       } else if (o.betTypeID === 'sp') {
         const team = teamName(o.sideID);
-        push(`spreads${suffix}`, { name: team, point: num(fd.spread), price, link: fd.deeplink });
+        main(`spreads${suffix}`, { name: team, point: num(fd.spread), price, link: fd.deeplink });
         for (const a of alts) push(`alternate_spreads${suffix}`, { name: team, point: num(a.spread), price: num(a.odds), link: a.deeplink });
       } else if (o.betTypeID === 'ou') {
         const side = o.sideID === 'over' ? 'Over' : 'Under';
         if (o.statEntityID === 'all') {
-          push(`totals${suffix}`, { name: side, point: num(fd.overUnder), price, link: fd.deeplink });
+          main(`totals${suffix}`, { name: side, point: num(fd.overUnder), price, link: fd.deeplink });
           for (const a of alts) push(`alternate_totals${suffix}`, { name: side, point: num(a.overUnder), price: num(a.odds), link: a.deeplink });
         } else {
           const team = teamName(o.statEntityID);
-          push(`team_totals${suffix}`, { name: side, description: team, point: num(fd.overUnder), price, link: fd.deeplink });
+          main(`team_totals${suffix}`, { name: side, description: team, point: num(fd.overUnder), price, link: fd.deeplink });
           for (const a of alts) push(`alternate_team_totals${suffix}`, { name: side, description: team, point: num(a.overUnder), price: num(a.odds), link: a.deeplink });
         }
       }
@@ -701,10 +711,10 @@ function sgoToOddsShape(e, sport) {
     const player = playerName(o);
     if (o.betTypeID === 'yn') {
       if (o.sideID !== 'yes') continue;
-      push(market, { name: 'Yes', description: player, price, link: fd.deeplink });
+      main(market, { name: 'Yes', description: player, price, link: fd.deeplink });
     } else if (o.betTypeID === 'ou') {
       const side = o.sideID === 'over' ? 'Over' : 'Under';
-      push(market, { name: side, description: player, point: num(fd.overUnder), price, link: fd.deeplink });
+      main(market, { name: side, description: player, point: num(fd.overUnder), price, link: fd.deeplink });
       if (side !== 'Over') continue; // FanDuel's milestone ladders (40+, 50+) are overs
       // "2+ TDs", "3+ TDs" belong with the main Total TDs lines; other stats get a milestone market.
       const altKey = market === 'player_tds_over' ? market : `${market}_alternate`;
@@ -771,6 +781,7 @@ const ALT_MARKETS = new Set([
   'player_rush_reception_yds', 'player_points_rebounds', 'player_points_assists',
   'batter_hits', 'batter_total_bases', 'batter_home_runs', 'batter_rbis', 'batter_hits_runs_rbis', 'batter_runs_scored',
   'pitcher_strikeouts', 'pitcher_outs', 'pitcher_hits_allowed', 'player_shots_on_goal', 'player_total_saves',
+  'player_goals', 'player_power_play_points',
 ]);
 const altKey = (market) => (ALT_MARKETS.has(market) ? `${market}_alternate` : null);
 
