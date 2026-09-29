@@ -165,6 +165,27 @@
           <button class="btn ghost" type="submit">Join group</button>
         </form>
       </div>
+
+      <!-- Only the app's owner sees this (OWNER_EMAIL). -->
+      <details id="owner-panel" class="owner-panel" hidden>
+        <summary>Owner · Live odds &amp; Pro members</summary>
+        <div class="owner-odds">
+          <div>
+            <strong>Live odds</strong>
+            <p id="owner-odds-status" class="muted small"></p>
+          </div>
+          <button id="owner-odds-toggle" class="btn sm" type="button"></button>
+        </div>
+        <h3 class="owner-sub">Pro members</h3>
+        <p id="owner-status" class="muted small"></p>
+        <form id="owner-form" class="owner-form" autocomplete="off">
+          <label for="owner-email" class="sr-only">Email to give Pro</label>
+          <input id="owner-email" type="email" placeholder="friend@email.com" required>
+          <button class="btn primary sm" type="submit">Give Pro</button>
+        </form>
+        <p id="owner-error" class="error" role="alert" hidden></p>
+        <ul id="owner-list" class="owner-list"></ul>
+      </details>
     </div>
   </main>
 

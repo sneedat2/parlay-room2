@@ -100,6 +100,29 @@ input, select {
 .form-title { margin: 0; font: 700 22px/1.1 var(--display); text-transform: uppercase; }
 .code-input { text-transform: uppercase; letter-spacing: .2em; font: 600 20px/1 var(--display); }
 
+/* Owner screen (only the app's owner sees it) */
+.owner-panel { border-top: 2px dashed var(--line); padding-top: 14px; display: flex; flex-direction: column; gap: 10px; }
+.owner-panel summary { cursor: pointer; font-weight: 700; }
+.owner-panel[open] summary { margin-bottom: 10px; }
+.owner-panel > p { margin: 0 0 10px; }
+.owner-odds {
+  display: flex; justify-content: space-between; align-items: center; gap: 12px;
+  padding: 10px 12px; border-radius: 10px; border: 1px solid var(--line); background: var(--surface-2); margin-bottom: 14px;
+}
+.owner-odds p { margin: 2px 0 0; }
+.owner-odds .btn { flex-shrink: 0; }
+.owner-sub { margin: 0 0 6px; font-size: 15px; }
+.owner-form { display: flex; gap: 8px; margin-bottom: 10px; }
+.owner-form input { flex: 1; min-width: 0; }
+.owner-list { list-style: none; margin: 10px 0 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+.owner-list li {
+  display: flex; justify-content: space-between; align-items: center; gap: 10px;
+  padding: 8px 12px; border-radius: 10px; border: 1px solid var(--line); background: var(--surface-2);
+}
+.owner-who { display: flex; flex-direction: column; min-width: 0; }
+.owner-who span:first-child { overflow-wrap: anywhere; }
+.sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+
 /* Group switcher + info */
 .group-switch { display: inline-flex; align-items: center; gap: 6px; background: none; border: 0; padding: 4px 0; cursor: pointer; }
 .caret { color: var(--muted); font-size: 14px; }
@@ -438,7 +461,7 @@ input, select {
 .option:hover { border-color: var(--accent); }
 .option .side { font-size: 14px; }
 .option .price { font: 700 20px/1 var(--display); font-variant-numeric: tabular-nums; }
-.option.added { border-color: var(--up); background: transparent; cursor: default; }
+.option.added { border-color: var(--up); background: transparent; } /* tap again to remove */
 /* Pro-only lines and markets on free accounts: visible, but dimmed */
 .option.locked, .mk-cell.locked, .chip.locked { opacity: 0.55; }
 .option.added .price::after { content: " ✓"; color: var(--up); }

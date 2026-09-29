@@ -36,7 +36,10 @@ const PUBLIC_DIR = path.join(__dirname, 'public');
 const SGO_KEY = (process.env.SGO_API_KEY || '').trim().replace(/^["']|["']$/g, '');
 const PROVIDER = (process.env.ODDS_PROVIDER || (SGO_KEY ? 'sgo' : 'oddsapi')).toLowerCase() === 'sgo' ? 'sgo' : 'oddsapi';
 const SGO = PROVIDER === 'sgo';
-const DEMO = SGO ? !SGO_KEY : !API_KEY;
+const NO_KEY = SGO ? !SGO_KEY : !API_KEY;
+// Demo odds: no key, or the owner switched live odds off (Owner screen) to save API credits while testing.
+// Nothing calls the odds services in the background, so "off" means zero API use.
+const isDemo = () => NO_KEY || !!db.oddsOff;
 
 // Email for password reset codes. Sent over HTTPS APIs (Railway blocks SMTP on Hobby plans).
 // Brevo works without owning a domain; Resend needs a verified domain to email anyone but you.
@@ -157,7 +160,12 @@ const isProMarket = (market) => !FREE_MARKETS.has(market);
 const PRO_EMAILS = new Set((process.env.PRO_EMAILS || '').split(',').map((e) => e.trim().toLowerCase()).filter(Boolean));
 // Testing phase: Pro limits are OFF unless PRO_LIMITS=on, so every account gets everything.
 const PRO_LIMITS_ON = String(process.env.PRO_LIMITS || '').toLowerCase() === 'on';
-const isPro = (m) => !PRO_LIMITS_ON || m.plan === 'pro' || (!!m.email && PRO_EMAILS.has(m.email));
+// The app's owner(s): see the Owner screen and can give or take away Pro there (saved in the data file,
+// no restart). Comma-separated emails in OWNER_EMAIL, kept out of the code.
+const OWNER_EMAILS = new Set((process.env.OWNER_EMAIL || '').split(',').map((e) => e.trim().toLowerCase()).filter(Boolean));
+const isOwner = (m) => !!m?.email && OWNER_EMAILS.has(m.email);
+const proInApp = (email) => !!email && (db.proEmails || []).includes(email);
+const isPro = (m) => !PRO_LIMITS_ON || isOwner(m) || m.plan === 'pro' || (!!m.email && (PRO_EMAILS.has(m.email) || proInApp(m.email)));
 const groupCount = (m) => db.groups.filter((g) => g.memberIds.includes(m.id)).length;
 const proOnly = (res, what) => send(res, 403, { error: `${what} is a Parlay Room Pro feature.`, upgrade: true });
 
@@ -616,7 +624,7 @@ function sgoToOddsShape(e, sport) {
 }
 
 async function listEvents(sport) {
-  if (DEMO) return demoEvents(sport);
+  if (isDemo()) return demoEvents(sport);
   if (SGO) {
     return (await sgoListEvents(sport))
       .map((e) => ({ id: e.eventID, home: e.teams?.home?.names?.long, away: e.teams?.away?.names?.long, commence: e.status?.startsAt }))
@@ -674,8 +682,8 @@ async function sgoShape(sport, eventId, force) {
 
 async function getProps(sport, eventId, market, { force = false } = {}) {
   // SportsGameOdds gives milestone lines for every player stat; The Odds API only for some.
-  const alt = SGO && !DEMO ? `${market}_alternate` : altKey(market);
-  const raw = DEMO
+  const alt = SGO && !isDemo() ? `${market}_alternate` : altKey(market);
+  const raw = isDemo()
     ? demoOdds(sport, eventId, market)
     : SGO
       ? await sgoShape(sport, eventId, force)
@@ -762,7 +770,7 @@ function parlayLink(legs) {
 // So with both keys set, SGO still supplies all the odds, and The Odds API is only asked for the
 // betslip codes of legs that are actually on a slip: about 1-2 credits per game+market, shared.
 
-const LINKS_FROM_ODDS_API = SGO && !DEMO && !!API_KEY;
+const linksFromOddsApi = () => SGO && !isDemo() && !!API_KEY;
 const CODE_RETRY_MS = 10 * 60 * 1000; // a leg that got no code is retried at most this often
 // When The Odds API rejects the key (not valid, or out of credits), stop asking for a while and
 // tell the slip why Place bet can't load legs, instead of failing silently.
@@ -771,7 +779,7 @@ const codesBlocked = () => !!codesProblem && codesProblem.until > Date.now();
 
 // The codes Place bet should use for a leg, or null if it has none that work.
 function betCodes(leg) {
-  if (!LINKS_FROM_ODDS_API) return leg.link || leg.sid ? { link: leg.link, sid: leg.sid, marketSid: leg.marketSid } : null;
+  if (!linksFromOddsApi()) return leg.link || leg.sid ? { link: leg.link, sid: leg.sid, marketSid: leg.marketSid } : null;
   return leg.fd || null; // SGO's own codes are left out: one bad code can make FanDuel drop the whole slip
 }
 
@@ -842,7 +850,7 @@ async function lookUpCodes(leg) {
 
 // Give legs working betslip codes. Missing codes are retried now and then; force = fetch again for all.
 async function attachCodes(legs, { force = false } = {}) {
-  if (!LINKS_FROM_ODDS_API || codesBlocked()) return false;
+  if (!linksFromOddsApi() || codesBlocked()) return false;
   let changed = false;
   await Promise.all(legs.map(async (leg) => {
     if (leg.unavailable || codesBlocked()) return;
@@ -1102,12 +1110,53 @@ async function handleApi(req, res, url) {
   const me = currentMember(req);
   if (!me) return send(res, 401, { error: 'Sign in first.' });
 
+  // ---- Owner screen: switch live odds off/on (off = demo odds, no API credits used). Instant, no restart.
+  if (pathname === '/api/owner/odds') {
+    if (!isOwner(me)) return send(res, 404, { error: 'Not found.' });
+    if (req.method === 'POST') {
+      db.oddsOff = !!(await readBody(req)).off;
+      save();
+      console.log(db.oddsOff ? 'Owner switched live odds OFF (demo odds, no API calls).' : 'Owner switched live odds back ON.');
+      for (const groupId of liveStreams.keys()) notifyGroup(groupId, 'odds-mode'); // open screens reload
+    }
+    return send(res, 200, { off: !!db.oddsOff, noKey: NO_KEY, provider: SGO ? 'SportsGameOdds' : 'The Odds API' });
+  }
+
+  // ---- Owner screen: who has Pro. Only OWNER_EMAIL accounts; everyone else gets "not found".
+  if (pathname === '/api/owner/pro') {
+    if (!isOwner(me)) return send(res, 404, { error: 'Not found.' });
+    db.proEmails = db.proEmails || [];
+    const list = () => {
+      const emails = new Set([...db.proEmails, ...PRO_EMAILS]);
+      return [...emails].sort().map((email) => ({
+        email,
+        name: memberByEmail(email)?.name || null, // null = hasn't signed up yet; Pro starts when they do
+        fromRailway: PRO_EMAILS.has(email) && !db.proEmails.includes(email),
+      }));
+    };
+    if (req.method === 'GET') return send(res, 200, { people: list(), limitsOn: PRO_LIMITS_ON });
+    const email = normalizeEmail((await readBody(req)).email);
+    if (!validEmail(email)) return send(res, 400, { error: 'Enter a valid email address.' });
+    if (req.method === 'POST') {
+      if (!db.proEmails.includes(email)) db.proEmails.push(email);
+    } else if (req.method === 'DELETE') {
+      if (PRO_EMAILS.has(email) && !db.proEmails.includes(email)) {
+        return send(res, 400, { error: 'That email is in PRO_EMAILS in Railway. Remove it there.' });
+      }
+      db.proEmails = db.proEmails.filter((e) => e !== email);
+    } else {
+      return send(res, 405, { error: 'Not allowed.' });
+    }
+    save();
+    return send(res, 200, { people: list(), limitsOn: PRO_LIMITS_ON });
+  }
+
   if (pathname === '/api/me') {
     const groups = db.groups.filter((g) => g.memberIds.includes(me.id)).map(groupView);
     return send(res, 200, {
-      me: { id: me.id, name: me.name, email: me.email || null, needsPassword: !!me.mustChangePassword, pro: isPro(me) },
+      me: { id: me.id, name: me.name, email: me.email || null, needsPassword: !!me.mustChangePassword, pro: isPro(me), owner: isOwner(me) },
       limits: { freeLegs: FREE_LEG_LIMIT },
-      groups, demo: DEMO, createNeedsCode: !!CREATE_CODE,
+      groups, demo: isDemo(), createNeedsCode: !!CREATE_CODE,
       // Only leaders need to know; they're the ones who can fix hosting.
       storageWarning: STORAGE_TEMPORARY && db.groups.some((g) => g.leaderId === me.id),
       sportsbooks: SPORTSBOOKS.map(({ key, title }) => ({ key, title })),
@@ -1324,12 +1373,12 @@ async function handleApi(req, res, url) {
 
   if (pathname === '/api/sports') {
     let active = null;
-    if (!DEMO && !SGO) {
+    if (!isDemo() && !SGO) {
       try { active = new Set((await oddsApi('/sports', {}, 3600)).map((s) => s.key)); } catch { active = null; }
     }
-    const sports = SPORTS.filter((s) => (DEMO ? demoSports.has(s.key) : SGO ? !sgoBlocked.has(s.key) : !active || active.has(s.key)))
+    const sports = SPORTS.filter((s) => (isDemo() ? demoSports.has(s.key) : SGO ? !sgoBlocked.has(s.key) : !active || active.has(s.key)))
       .map((s) => ({ ...s, markets: s.markets.map((m) => ({ ...m, pro: isProMarket(m.key) })) }));
-    return send(res, 200, { sports, demo: DEMO });
+    return send(res, 200, { sports, demo: isDemo() });
   }
 
   if (pathname === '/api/events') {
@@ -1385,7 +1434,7 @@ async function handleApi(req, res, url) {
         };
       }),
       quota,
-      demo: DEMO,
+      demo: isDemo(),
       at: new Date().toISOString(),
     });
   }
@@ -1641,6 +1690,8 @@ const refreshing = new Map(); // groupId -> in-flight refresh, so simultaneous r
 const FORCE_GAP_MS = 30 * 1000;
 
 async function refreshLegOdds(group, { force = false, onlyIfOlderThan = 0 } = {}) {
+  // Live odds switched off: leave slips as they are (re-pricing against demo odds would mark real legs pulled).
+  if (db.oddsOff && !NO_KEY) return;
   const age = group.oddsAt ? Date.now() - Date.parse(group.oddsAt) : Infinity;
   if (force ? age < FORCE_GAP_MS : age < onlyIfOlderThan) return;
   if (refreshing.has(group.id)) return refreshing.get(group.id);
@@ -1666,7 +1717,7 @@ async function repriceLegs(group, force) {
       // The odds source doesn't know this game (it's over, or the leg came from a different odds
       // source/demo). Its FanDuel code is dead, and one dead code can make FanDuel reject the whole
       // betslip, so mark it pulled and leave it out of Place bet. Other errors are temporary: keep it.
-      const gone = err.status === 404 || String(eventId).startsWith('demo-') !== DEMO;
+      const gone = err.status === 404 || String(eventId).startsWith('demo-') !== isDemo();
       if (gone) for (const leg of legs) if (!leg.unavailable) { leg.unavailable = true; changed = true; }
       return;
     }
@@ -1700,13 +1751,14 @@ http.createServer(async (req, res) => {
   }
 }).listen(PORT, () => {
   console.log(`Parlay Room running at http://localhost:${PORT}`);
-  if (DEMO) console.log(`No ${SGO ? 'SGO_API_KEY' : 'ODDS_API_KEY'} set — using demo odds.`);
+  if (NO_KEY) console.log(`No ${SGO ? 'SGO_API_KEY' : 'ODDS_API_KEY'} set — using demo odds.`);
+  else if (db.oddsOff) console.log('Live odds are switched OFF on the Owner screen — using demo odds, no API calls.');
   else console.log(`Odds from ${SGO ? 'SportsGameOdds' : 'The Odds API'} (FanDuel).`);
-  if (LINKS_FROM_ODDS_API && API_KEY === SGO_KEY) {
+  if (linksFromOddsApi() && API_KEY === SGO_KEY) {
     console.warn('WARNING: ODDS_API_KEY is the same as SGO_API_KEY. ODDS_API_KEY needs your key from the-odds-api.com, not the SportsGameOdds key.');
   }
-  if (LINKS_FROM_ODDS_API) console.log('FanDuel betslip links from The Odds API.');
-  else if (SGO && !DEMO) console.log("FanDuel betslip links from SportsGameOdds (add ODDS_API_KEY to use The Odds API's links instead).");
+  if (linksFromOddsApi()) console.log('FanDuel betslip links from The Odds API.');
+  else if (SGO && !isDemo()) console.log("FanDuel betslip links from SportsGameOdds (add ODDS_API_KEY to use The Odds API's links instead).");
   console.log(`Saving data to ${DATA_FILE} (${db.members.length} accounts, ${db.groups.length} groups loaded).`);
   console.log(PRO_LIMITS_ON ? 'Pro limits are ON (free accounts are limited).' : 'Pro limits are OFF: every account gets every feature (testing mode).');
   if (STORAGE_TEMPORARY) {

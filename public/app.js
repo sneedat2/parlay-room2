@@ -314,8 +314,75 @@ function showGroups() {
       el('span', { class: 'muted small' },
         `${g.members.length} member${g.members.length === 1 ? '' : 's'}${g.leaderId === state.me.id ? ' · you lead' : ''}`)))));
   list.hidden = !state.groups.length;
+  $('#owner-panel').hidden = !state.me.owner;
+  if (state.me.owner) loadOwner();
   showScreen('groups');
 }
+
+// ---------------------------------------------------------------- owner screen (Pro members)
+
+function renderOwner({ people, limitsOn }) {
+  $('#owner-status').textContent = limitsOn
+    ? 'Pro limits are ON. These people get every feature for free (you always do).'
+    : "Pro limits are OFF (testing), so everyone has every feature right now. This list takes effect when PRO_LIMITS is set to on.";
+  $('#owner-list').replaceChildren(...(people.length ? people.map((p) => el('li', {},
+    el('span', { class: 'owner-who' },
+      el('span', {}, p.email),
+      el('span', { class: 'muted small' }, p.name ? p.name : "Hasn't signed up yet. Pro starts when they do.")),
+    p.fromRailway
+      ? el('span', { class: 'muted small' }, 'Set in Railway')
+      : el('button', { class: 'btn ghost sm', type: 'button', onclick: () => changeOwnerPro('DELETE', p.email) }, 'Remove')))
+    : [el('li', { class: 'muted small' }, 'Nobody yet. Add an email above.')]));
+}
+
+async function loadOwner() {
+  try { renderOwner(await api('/api/owner/pro')); } catch (ex) { $('#owner-status').textContent = ex.message; }
+  try { renderOwnerOdds(await api('/api/owner/odds')); } catch (ex) { $('#owner-odds-status').textContent = ex.message; }
+}
+
+function renderOwnerOdds({ off, noKey, provider }) {
+  const btn = $('#owner-odds-toggle');
+  btn.hidden = noKey;
+  $('#owner-odds-status').textContent = noKey
+    ? 'No odds API key is set, so the app is on demo odds.'
+    : off
+      ? `OFF: everyone sees demo odds and ${provider} isn't used at all (no credits).`
+      : `ON: real FanDuel odds from ${provider} (uses API credits).`;
+  btn.textContent = off ? 'Turn on' : 'Turn off';
+  btn.className = `btn sm ${off ? 'primary' : 'ghost'}`;
+  btn.dataset.off = String(!!off);
+}
+
+$('#owner-odds-toggle').addEventListener('click', async () => {
+  const btn = $('#owner-odds-toggle');
+  const off = btn.dataset.off !== 'true'; // flip it
+  btn.disabled = true;
+  try {
+    renderOwnerOdds(await api('/api/owner/odds', { method: 'POST', body: { off } }));
+    toast(off ? 'Live odds off: demo odds, no API credits used' : 'Live odds back on');
+    state.sports = []; // the game list changes between demo and real odds
+  } catch (ex) { toast(ex.message); }
+  btn.disabled = false;
+});
+
+async function changeOwnerPro(method, email) {
+  const err = $('#owner-error');
+  err.hidden = true;
+  try {
+    renderOwner(await api('/api/owner/pro', { method, body: { email } }));
+    toast(method === 'POST' ? `${email} has Pro` : `Removed Pro from ${email}`);
+    return true;
+  } catch (ex) {
+    err.textContent = ex.message;
+    err.hidden = false;
+    return false;
+  }
+}
+
+$('#owner-form').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  if (await changeOwnerPro('POST', $('#owner-email').value)) $('#owner-email').value = '';
+});
 
 $('#create-form').addEventListener('submit', async (e) => {
   e.preventDefault();
@@ -1450,6 +1517,7 @@ function markLadderAdded() {
 async function addLadderLeg(e, rung) {
   const target = state.slips.find((s) => s.id === state.addSlipId) || currentSlip();
   if (!target) return toast('Make a slip first.');
+  if (await toggleOff(target, e.id, rung.market, rung.key)) return;
   try {
     const { leg } = await groupApi(`/slips/${target.id}/legs`, { method: 'POST', body: { sport: state.sport, eventId: e.id, market: rung.market, key: rung.key } });
     toast(`Added ${leg?.label || rung.label} to ${target.name}`);
@@ -1543,17 +1611,37 @@ function renderOutcomes() {
       const locked = !added && lineLocked(p.market, o.key);
       const sideText = outcomeSide(p, o);
       return el('button', {
-        class: `option${added ? ' added' : ''}${locked ? ' locked' : ''}`, type: 'button', disabled: added,
-        'aria-label': `${added ? 'On slip: ' : locked ? 'Pro only: ' : 'Add '}${o.label} ${fmtOdds(o.price)}`,
+        class: `option${added ? ' added' : ''}${locked ? ' locked' : ''}`, type: 'button', 'aria-pressed': String(added),
+        'aria-label': `${added ? 'On slip, tap to remove: ' : locked ? 'Pro only: ' : 'Add '}${o.label} ${fmtOdds(o.price)}`,
         onclick: () => (locked ? proToast('Alternate lines') : addLeg(o)),
       }, el('span', { class: 'side' }, locked ? `🔒 ${sideText}` : sideText), el('span', { class: 'price' }, fmtOdds(o.price)));
     })))));
+}
+
+// Tapping a prop that's already on the slip takes it back off (same rules as Remove on the slip).
+// Returns true if it handled the tap.
+async function toggleOff(target, eventId, market, key) {
+  const leg = target.legs.find((l) => l.eventId === eventId && l.market === market && l.key === key);
+  if (!leg) return false;
+  if (!canManageLeg(leg)) {
+    toast(state.group?.locked
+      ? 'This group is locked. Only its editors can remove legs.'
+      : 'Only the person who added this leg or the group leader can remove it.');
+    return true;
+  }
+  try {
+    await groupApi(`/slips/${target.id}/legs/${leg.id}`, { method: 'DELETE' });
+    toast(`Removed ${leg.label} from ${target.name}`);
+  } catch (ex) { toast(ex.message); }
+  await loadLegs(false);
+  return true;
 }
 
 async function addLeg(o) {
   const p = state.props;
   const target = state.slips.find((s) => s.id === state.addSlipId) || currentSlip();
   if (!target) return toast('Make a slip first.');
+  if (await toggleOff(target, p.event.id, p.market, o.key)) return;
   try {
     await groupApi(`/slips/${target.id}/legs`, { method: 'POST', body: { sport: p.sport, eventId: p.event.id, market: p.market, key: o.key } });
     toast(`Added ${o.label} to ${target.name}`);
@@ -1746,7 +1834,13 @@ async function connectLive() {
   const es = new EventSource(`/api/live?ticket=${encodeURIComponent(ticket)}`);
   live = es;
   es.onopen = () => { setLive(true); loadLegs(false); }; // catch up on anything missed while disconnected
-  es.addEventListener('changed', () => loadLegs(false));
+  es.addEventListener('changed', (e) => {
+    // The owner switched live odds on/off: games and odds all change, so start the page over.
+    let what = null;
+    try { what = JSON.parse(e.data).what; } catch { /* old server */ }
+    if (what === 'odds-mode') return location.reload();
+    loadLegs(false);
+  });
   es.onerror = () => {
     // Tickets are one-time, so the browser's own retry can't reuse this one. Get a new one.
     if (live !== es) return;
