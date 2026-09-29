@@ -1,4 +1,4 @@
-// Parlay Room — a shared FanDuel prop board for a small betting group.
+// Parlay Room — a shared sportsbook prop board (FanDuel, DraftKings) for a small betting group.
 // Zero dependencies: needs Node 18+ (built-in fetch). Run with `node server.js`.
 
 const http = require('http');
@@ -273,11 +273,15 @@ function readRaw(req, limit = 1024 * 1024) {
 const groupCount = (m) => db.groups.filter((g) => g.memberIds.includes(m.id)).length;
 const proOnly = (res, what) => send(res, 403, { error: `${what} is a Parlay Room Pro feature.`, upgrade: true });
 
-// Sportsbooks a group can bet with. Odds and betslip links currently come from FanDuel only.
+// Sportsbooks a group can bet with. The group leader picks one; its odds, slip prices and betslip
+// links are what the group sees. A leg remembers its book (leg.book, FanDuel for older legs).
 const SPORTSBOOKS = [
   { key: 'fanduel', title: 'FanDuel', home: 'https://sportsbook.fanduel.com/' },
+  { key: 'draftkings', title: 'DraftKings', home: 'https://sportsbook.draftkings.com/' },
 ];
 const bookFor = (g) => SPORTSBOOKS.find((b) => b.key === g.sportsbook) || SPORTSBOOKS[0];
+const bookByKey = (k) => SPORTSBOOKS.find((b) => b.key === k) || SPORTSBOOKS[0];
+const legBook = (leg) => leg.book || 'fanduel';
 const marketLabel = (sport, m) => sportByKey(sport)?.markets.find((x) => x.key === m)?.label || m;
 
 // ---------------------------------------------------------------- storage
@@ -506,7 +510,7 @@ async function oddsApi(pathname, params = {}, ttlSeconds = CACHE_SECONDS, force 
       : res.status === 401
         ? "The odds service rejected the app's key. The group's owner needs to check the odds API key in the app's settings."
         : res.status === 429 ? 'Odds are busy right now. Try again in a minute.'
-          : res.status === 404 ? "That game isn't on FanDuel anymore." : "Couldn't load odds right now. Try again in a minute.";
+          : res.status === 404 ? "That game isn't on the sportsbook anymore." : "Couldn't load odds right now. Try again in a minute.";
     const err = new Error(message);
     err.status = res.status === 429 ? 429 : res.status === 404 ? 404 : 502;
     err.keyProblem = res.status === 401; // bad key or out of credits: retrying won't help for a while
@@ -568,7 +572,8 @@ async function sgoCheckUsage() {
   } catch { /* not critical */ }
 }
 
-const sgoOddsQuery = 'bookmakerID=fanduel&includeAltLines=true';
+// Every supported book in one request: SportsGameOdds bills per game, not per book, so it costs the same.
+const sgoOddsQuery = `bookmakerID=${SPORTSBOOKS.map((b) => b.key).join(',')}&includeAltLines=true`;
 
 async function sgoListEvents(sport) {
   const league = SGO_LEAGUE[sport];
@@ -606,7 +611,7 @@ async function sgoEvent(eventId, force = false) {
   if (!force && have && Date.now() - have.at < SGO_EVENT_MS) return have.event;
   const body = await sgoGet(`/events/?eventID=${encodeURIComponent(eventId)}&${sgoOddsQuery}`);
   const e = (body.data || [])[0];
-  if (!e) throw Object.assign(new Error('FanDuel no longer has odds for this game.'), { status: 404 });
+  if (!e) throw Object.assign(new Error('The sportsbook no longer has odds for this game.'), { status: 404 });
   sgoEvents.set(eventId, { event: e, at: Date.now() });
   return e;
 }
@@ -649,8 +654,8 @@ const SGO_PERIOD = {
   '1i': '_1st_1_innings', '1ix3': '_1st_3_innings', '1ix5': '_1st_5_innings', '1ix7': '_1st_7_innings',
 };
 
-// Translate one SportsGameOdds event into The Odds API's event shape (FanDuel only).
-function sgoToOddsShape(e, sport) {
+// Translate one SportsGameOdds event into The Odds API's event shape, for one sportsbook.
+function sgoToOddsShape(e, sport, book = 'fanduel') {
   const family = sport.split('_')[0];
   const statMap = SGO_PLAYER_STATS[family] || {};
   const home = e.teams?.home?.names?.long || 'Home';
@@ -667,7 +672,7 @@ function sgoToOddsShape(e, sport) {
   const num = (v) => (v == null || v === '' ? null : Number(v));
 
   for (const o of Object.values(e.odds || {})) {
-    const fd = o.byBookmaker?.fanduel;
+    const fd = o.byBookmaker?.[book];
     if (!fd) continue;
     const price = num(fd.odds);
     const alts = (fd.altLines || []).filter((a) => a.available !== false && Number.isFinite(num(a.odds)));
@@ -726,10 +731,10 @@ function sgoToOddsShape(e, sport) {
   return {
     id: e.eventID, home_team: home, away_team: away, commence_time: e.status?.startsAt,
     bookmakers: [{
-      key: 'fanduel',
-      // The game's page on FanDuel. Uses FanDuel's game number, not betslip codes, so it opens
+      key: book,
+      // The game's page on the sportsbook. Uses its game number, not betslip codes, so it opens
       // the right game even where the betslip codes don't work.
-      link: e.links?.bookmakers?.fanduel || null,
+      link: e.links?.bookmakers?.[book] || null,
       markets: [...markets].map(([key, outcomes]) => ({ key, last_update: lastUpdate, outcomes })),
     }],
   };
@@ -786,29 +791,31 @@ const ALT_MARKETS = new Set([
 const altKey = (market) => (ALT_MARKETS.has(market) ? `${market}_alternate` : null);
 
 // SportsGameOdds: one saved, translated copy per game, shared by every market of that game.
-async function sgoShape(sport, eventId, force) {
+async function sgoShape(sport, eventId, force, book = 'fanduel') {
   await sgoEvent(eventId, force);
   const entry = sgoEvents.get(eventId);
-  if (!entry.shape) entry.shape = sgoToOddsShape(entry.event, sport);
-  return entry.shape;
+  entry.shapes = entry.shapes || {}; // one translated copy per sportsbook
+  if (!entry.shapes[book]) entry.shapes[book] = sgoToOddsShape(entry.event, sport, book);
+  return entry.shapes[book];
 }
 
-async function getProps(sport, eventId, market, { force = false } = {}) {
+async function getProps(sport, eventId, market, { force = false, book = 'fanduel' } = {}) {
   // SportsGameOdds gives milestone lines for every player stat; The Odds API only for some.
   const alt = SGO && !isDemo() ? `${market}_alternate` : altKey(market);
   const raw = isDemo()
     ? demoOdds(sport, eventId, market)
     : SGO
-      ? await sgoShape(sport, eventId, force)
+      ? await sgoShape(sport, eventId, force, book)
       : await oddsApi(`/sports/${sport}/events/${eventId}/odds`, {
       regions: 'us',
       markets: alt ? `${market},${alt}` : market,
-      bookmakers: 'fanduel',
+      bookmakers: book,
       oddsFormat: 'american',
       includeLinks: 'true',
       includeSids: 'true',
     }, CACHE_SECONDS, force);
-  const bk = (raw.bookmakers || []).find((b) => b.key === 'fanduel');
+  // Demo odds are the same for every book.
+  const bk = (raw.bookmakers || []).find((b) => b.key === book) || (isDemo() ? raw.bookmakers?.[0] : null);
   const main = bk?.markets?.find((x) => x.key === market);
   const altM = alt && bk?.markets?.find((x) => x.key === alt);
   const event = {
@@ -852,7 +859,8 @@ async function getProps(sport, eventId, market, { force = false } = {}) {
 
 // One FanDuel URL that loads every leg it can into the betslip.
 // Returns { url, linked, missing }: missing = legs FanDuel gave no betslip code for (added by hand).
-function parlayLink(legs) {
+function parlayLink(legs, book = 'fanduel') {
+  if (book === 'draftkings') return draftKingsLink(legs);
   const picks = [];
   const missing = [];
   let origin = 'https://sportsbook.fanduel.com';
@@ -878,6 +886,26 @@ function parlayLink(legs) {
   return { url: `${origin}/addToBetslip?${qs}`, linked: picks.length, missing };
 }
 
+// DraftKings betslip links look like sportsbook.draftkings.com/event/123?outcomes=ID. Several legs go
+// in one link as outcomes=ID1+ID2. DraftKings gives these codes for game lines, but for few player props.
+function draftKingsLink(legs) {
+  const ids = [];
+  const missing = [];
+  let base = null;
+  for (const leg of legs) {
+    let id = null;
+    try {
+      const u = new URL(leg.link);
+      id = u.searchParams.get('outcomes');
+      if (id && !base) base = `${u.origin}${u.pathname}`;
+    } catch { /* no link */ }
+    if (id) ids.push(id);
+    else missing.push(leg.player ? `${leg.label} ${leg.marketLabel}` : leg.label);
+  }
+  if (!ids.length) return { url: null, linked: 0, missing };
+  return { url: `${base}?outcomes=${ids.map(encodeURIComponent).join('+')}`, linked: ids.length, missing };
+}
+
 // ---------------------------------------------------------------- FanDuel betslip codes (SGO + Odds API mix)
 // SportsGameOdds' FanDuel codes don't open FanDuel's betslip in every state, but The Odds API's do.
 // So with both keys set, SGO still supplies all the odds, and The Odds API is only asked for the
@@ -892,6 +920,7 @@ const codesBlocked = () => !!codesProblem && codesProblem.until > Date.now();
 
 // The codes Place bet should use for a leg, or null if it has none that work.
 function betCodes(leg) {
+  if (legBook(leg) !== 'fanduel') return leg.link ? { link: leg.link } : null; // the Odds API mix is FanDuel-only
   if (!linksFromOddsApi()) return leg.link || leg.sid ? { link: leg.link, sid: leg.sid, marketSid: leg.marketSid } : null;
   return leg.fd || null; // SGO's own codes are left out: one bad code can make FanDuel drop the whole slip
 }
@@ -966,7 +995,7 @@ async function attachCodes(legs, { force = false } = {}) {
   if (!linksFromOddsApi() || codesBlocked()) return false;
   let changed = false;
   await Promise.all(legs.map(async (leg) => {
-    if (leg.unavailable || codesBlocked()) return;
+    if (leg.unavailable || legBook(leg) !== 'fanduel' || codesBlocked()) return;
     const tried = leg.fdTriedAt ? Date.now() - Date.parse(leg.fdTriedAt) : Infinity;
     if (!force && (leg.fd || tried < CODE_RETRY_MS)) return;
     leg.fdTriedAt = new Date().toISOString();
@@ -1475,7 +1504,18 @@ async function handleApi(req, res, url) {
     if (!isLeader) return send(res, 403, { error: 'Only the group leader can change the sportsbook.' });
     const { sportsbook } = await readBody(req);
     if (!SPORTSBOOKS.some((b) => b.key === sportsbook)) return send(res, 400, { error: 'That sportsbook isn’t supported yet.' });
-    group.sportsbook = sportsbook;
+    if (group.sportsbook !== sportsbook) {
+      group.sportsbook = sportsbook;
+      // Every leg moves to the new book: its odds and betslip links come from there now. Lines the
+      // new book doesn't offer show as pulled until the group swaps them out.
+      for (const leg of group.slips.flatMap((s) => s.legs)) {
+        leg.book = sportsbook;
+        leg.eventLink = null; // the old book's game page
+        delete leg.fd;
+        delete leg.fdTriedAt;
+      }
+      try { await repriceLegs(group, false); } catch (err) { console.warn(`Re-pricing after book change: ${err.message}`); }
+    }
     save();
     notifyGroup(group.id, 'settings');
     return send(res, 200, { group: groupView(group) });
@@ -1571,7 +1611,8 @@ async function handleApi(req, res, url) {
     const event = url.searchParams.get('event');
     const market = url.searchParams.get('market');
     if (!sportByKey(sport) || !event || !market) return send(res, 400, { error: 'Pick a sport, game and market.' });
-    return send(res, 200, { ...(await getProps(sport, event, market)), quota });
+    const book = bookByKey(url.searchParams.get('book')).key; // the group's sportsbook
+    return send(res, 200, { ...(await getProps(sport, event, market, { book })), book, quota });
   }
 
   // "By market" view: one game's players laid out as a ladder (40+, 50+, 60+) or, for TDs, as columns.
@@ -1581,7 +1622,8 @@ async function handleApi(req, res, url) {
     const kind = url.searchParams.get('kind');
     const ok = kind === 'tds' || sportByKey(sport)?.markets.some((m) => m.key === kind && m.group === 'player');
     if (!sportByKey(sport) || !event || !ok) return send(res, 400, { error: 'Pick a sport, game and category.' });
-    return send(res, 200, { ...(await getLadder(sport, event, kind)), quota });
+    const book = bookByKey(url.searchParams.get('book')).key;
+    return send(res, 200, { ...(await getLadder(sport, event, kind, book)), book, quota });
   }
 
   // ---- Slips: every group has one or more named slips, each with its own legs and Place bet.
@@ -1598,7 +1640,7 @@ async function handleApi(req, res, url) {
       oddsAt: group.oddsAt || null,
       oddsEveryMinutes: SLIP_ODDS_MINUTES,
       slips: group.slips.map((s) => {
-        const link = parlayLink(s.legs.filter((l) => !l.unavailable));
+        const link = parlayLink(s.legs.filter((l) => !l.unavailable), bookFor(group).key);
         return {
           ...s,
           legs: s.legs.map(({ fd, fdTriedAt, ...leg }) => ({ ...leg, link: legBetLink({ ...leg, fd }) })),
@@ -1694,9 +1736,10 @@ async function handleApi(req, res, url) {
     const { sport, eventId, market, key, note } = await readBody(req);
     if (!sportByKey(sport)) return send(res, 400, { error: 'Unknown sport.' });
     if (!isPro(me) && isProMarket(market)) return proOnly(res, marketLabel(sport, market));
-    const props = await getProps(sport, eventId, market);
+    const book = bookFor(group).key;
+    const props = await getProps(sport, eventId, market, { book });
     const o = props.outcomes.find((x) => x.key === key);
-    if (!o) return send(res, 404, { error: 'FanDuel no longer offers that line. Refresh and try again.' });
+    if (!o) return send(res, 404, { error: ` no longer offers that line. Refresh and try again.` });
     if (!isPro(me) && o.alt) return proOnly(res, 'Alternate lines');
     if (!isPro(me) && slip.legs.length >= FREE_LEG_LIMIT) return proOnly(res, `More than ${FREE_LEG_LIMIT} legs on a slip`);
     if (slip.legs.some((l) => l.eventId === eventId && l.market === market && l.key === key)) {
@@ -1708,7 +1751,7 @@ async function handleApi(req, res, url) {
       eventId, eventName: props.event.name, commence: props.event.commence,
       market, marketLabel: props.marketLabel,
       key, label: o.label, player: o.player, side: o.side, point: o.point,
-      price: o.price, priceAtAdd: o.price,
+      price: o.price, priceAtAdd: o.price, book,
       link: o.link, sid: o.sid, marketSid: o.marketSid,
       eventLink: props.event.link,
       note: String(note || '').trim().slice(0, 140),
@@ -1791,10 +1834,10 @@ async function handleApi(req, res, url) {
 
 const cellOf = (market, o) => ({ market, key: o.key, price: o.price, label: o.label });
 
-async function getLadder(sport, eventId, kind) {
-  if (kind === 'tds') return tdColumns(sport, eventId);
+async function getLadder(sport, eventId, kind, book = 'fanduel') {
+  if (kind === 'tds') return tdColumns(sport, eventId, book);
 
-  const p = await getProps(sport, eventId, kind);
+  const p = await getProps(sport, eventId, kind, { book });
   const byPlayer = new Map();
   for (const o of p.outcomes) {
     if (!o.player) continue;
@@ -1831,9 +1874,9 @@ async function getLadder(sport, eventId, kind) {
 }
 
 // TDs: ANYTIME | FIRST | 2+ | 3+ columns, one row per player (like FanDuel's TD tab).
-async function tdColumns(sport, eventId) {
+async function tdColumns(sport, eventId, book = 'fanduel') {
   const markets = ['player_anytime_td', 'player_1st_td', 'player_tds_over'];
-  const results = await Promise.all(markets.map((m) => getProps(sport, eventId, m).catch(() => null)));
+  const results = await Promise.all(markets.map((m) => getProps(sport, eventId, m, { book }).catch(() => null)));
   const event = results.find(Boolean)?.event;
   const rows = new Map();
   const cols = new Set();
@@ -1882,7 +1925,7 @@ async function refreshLegOdds(group, { force = false, onlyIfOlderThan = 0 } = {}
 async function repriceLegs(group, force) {
   const groups = new Map();
   for (const leg of group.slips.flatMap((s) => s.legs)) {
-    const k = `${leg.sport}|${leg.eventId}|${leg.market}`;
+    const k = `${legBook(leg)}|${leg.sport}|${leg.eventId}|${leg.market}`;
     if (!groups.has(k)) groups.set(k, []);
     groups.get(k).push(leg);
   }
@@ -1891,7 +1934,7 @@ async function repriceLegs(group, force) {
     const { sport, eventId, market } = legs[0];
     let props;
     try {
-      props = await getProps(sport, eventId, market, { force });
+      props = await getProps(sport, eventId, market, { force, book: legBook(legs[0]) });
     } catch (err) {
       // The odds source doesn't know this game (it's over, or the leg came from a different odds
       // source/demo). Its FanDuel code is dead, and one dead code can make FanDuel reject the whole
@@ -1932,7 +1975,7 @@ http.createServer(async (req, res) => {
   console.log(`Parlay Room running at http://localhost:${PORT}`);
   if (NO_KEY) console.log(`No ${SGO ? 'SGO_API_KEY' : 'ODDS_API_KEY'} set — using demo odds.`);
   else if (db.oddsOff) console.log('Live odds are switched OFF on the Owner screen — using demo odds, no API calls.');
-  else console.log(`Odds from ${SGO ? 'SportsGameOdds' : 'The Odds API'} (FanDuel).`);
+  else console.log(`Odds from ${SGO ? 'SportsGameOdds' : 'The Odds API'} (${SPORTSBOOKS.map((b) => b.title).join(', ')}).`);
   if (linksFromOddsApi() && API_KEY === SGO_KEY) {
     console.warn('WARNING: ODDS_API_KEY is the same as SGO_API_KEY. ODDS_API_KEY needs your key from the-odds-api.com, not the SportsGameOdds key.');
   }
