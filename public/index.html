@@ -434,6 +434,10 @@
               <button id="leave-no" class="btn ghost sm" type="button">Cancel</button>
             </span>
           </div>
+          <!-- Only the group's creator and leader see this -->
+          <div class="leave-row" id="delete-group-row" hidden>
+            <button id="delete-group" class="btn danger sm" type="button">Delete group</button>
+          </div>
         </details>
       </section>
 
@@ -474,6 +478,20 @@
   </div>
 
   <div id="toast" class="toast" role="status" hidden></div>
+
+  <!-- Delete group: "are you sure?" -->
+  <dialog id="delete-group-dialog" class="upgrade-dialog" aria-labelledby="delete-group-title">
+    <form method="dialog">
+      <h2 id="delete-group-title" class="form-title">Delete group?</h2>
+      <p>Are you sure you want to delete <strong id="delete-group-name"></strong>? This action can't be undone.</p>
+      <p class="muted small">Every slip and leg in the group is deleted, and all <span id="delete-group-count"></span> lose access.</p>
+      <p id="delete-group-error" class="error" role="alert" hidden></p>
+      <div class="upgrade-actions">
+        <button class="btn ghost" value="cancel" type="submit">Cancel</button>
+        <button id="delete-group-yes" class="btn danger" type="button">Yes, delete group</button>
+      </div>
+    </form>
+  </dialog>
 
   <!-- Upgrade to Pro (opens when a free account taps a Pro feature) -->
   <dialog id="upgrade-dialog" class="upgrade-dialog" aria-labelledby="upgrade-title">

@@ -389,7 +389,7 @@ function groupView(g) {
   const removed = people(g.bannedIds).map((m) => ({ id: m.id, name: m.name }));
   const book = bookFor(g);
   return {
-    id: g.id, name: g.name, code: g.code, leaderId: g.leaderId, members, removed,
+    id: g.id, name: g.name, code: g.code, leaderId: g.leaderId, createdBy: g.createdBy || null, members, removed,
     locked: !!g.locked,
     sportsbook: { key: book.key, title: book.title },
   };
@@ -1450,7 +1450,7 @@ async function handleApi(req, res, url) {
     if (!isPro(me) && groupCount(me) >= FREE_GROUP_LIMIT) return proOnly(res, 'Being in more than one group');
     const g = {
       id: newId(), name: cleanName, code: newInviteCode(), leaderId: me.id,
-      memberIds: [me.id], slips: [newSlip('Main slip', me.id)], sportsbook: SPORTSBOOKS[0].key, createdAt: new Date().toISOString(),
+      createdBy: me.id, memberIds: [me.id], slips: [newSlip('Main slip', me.id)], sportsbook: SPORTSBOOKS[0].key, createdAt: new Date().toISOString(),
     };
     db.groups.push(g);
     save();
@@ -1486,6 +1486,22 @@ async function handleApi(req, res, url) {
     const ticket = crypto.randomBytes(18).toString('base64url');
     liveTickets.set(ticket, { memberId: me.id, groupId: group.id, expires: Date.now() + 60 * 1000 });
     return send(res, 200, { ticket });
+  }
+
+  // Delete the whole group (slips, legs, members' access). Only its creator or the current leader.
+  // Can't be undone; the app asks "are you sure?" first.
+  if (group && sub === '' && req.method === 'DELETE') {
+    if (!isLeader && group.createdBy !== me.id) {
+      return send(res, 403, { error: 'Only the group leader or the person who made the group can delete it.' });
+    }
+    db.groups = db.groups.filter((g) => g.id !== group.id);
+    save();
+    console.log(`Group "${group.name}" deleted by ${me.email || me.name}.`);
+    // Everyone else looking at it is sent back to their group list, then their live connections close.
+    notifyGroup(group.id, 'group-deleted');
+    for (const r of liveStreams.get(group.id) || []) r.end();
+    liveStreams.delete(group.id);
+    return send(res, 200, { ok: true });
   }
 
   if (group && sub === '/leave' && req.method === 'POST') {

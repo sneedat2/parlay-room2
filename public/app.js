@@ -606,6 +606,7 @@ function renderGroupHeader() {
   $('#invite-code').textContent = g.code;
   $('#invite-link').textContent = inviteLink(g.code);
   $('#edit-code').hidden = !amLeader() || !$('#code-form').hidden;
+  $('#delete-group-row').hidden = !canDeleteGroup();
   if (!amLeader()) $('#code-form').hidden = true;
   $('#member-count').textContent = `${g.members.length} member${g.members.length === 1 ? '' : 's'}`;
 
@@ -773,6 +774,43 @@ $('#leave-yes').addEventListener('click', async () => {
   } catch (ex) { toast(ex.message); }
 });
 function resetLeave() { $('#leave').hidden = false; $('#leave-confirm').hidden = true; }
+
+// Delete group: only its creator or the leader, after a pop-up "are you sure?".
+const canDeleteGroup = () => amLeader() || (!!state.group?.createdBy && state.group.createdBy === state.me?.id);
+$('#delete-group').addEventListener('click', () => {
+  const g = state.group;
+  $('#delete-group-name').textContent = g.name;
+  $('#delete-group-count').textContent = `${g.members.length} member${g.members.length === 1 ? '' : 's'}`;
+  $('#delete-group-error').hidden = true;
+  $('#delete-group-yes').disabled = false;
+  $('#delete-group-dialog').showModal();
+});
+$('#delete-group-yes').addEventListener('click', async () => {
+  const name = state.group.name;
+  $('#delete-group-yes').disabled = true;
+  try {
+    await groupApi('', { method: 'DELETE' });
+    $('#delete-group-dialog').close();
+    store('pr_group', null);
+    state.groupId = null;
+    await loadMe();
+    showGroups();
+    toast(`${name} was deleted`);
+  } catch (ex) {
+    showError('#delete-group-error', ex.message);
+    $('#delete-group-yes').disabled = false;
+  }
+});
+
+// Someone else deleted the group I'm looking at: back to my groups.
+async function groupWasDeleted() {
+  const name = state.group?.name || 'This group';
+  store('pr_group', null);
+  state.groupId = null;
+  await loadMe().catch(() => {});
+  showGroups();
+  toast(`${name} was deleted by its leader`);
+}
 
 // ---------------------------------------------------------------- tabs
 
@@ -2002,6 +2040,7 @@ async function connectLive() {
     let what = null;
     try { what = JSON.parse(e.data).what; } catch { /* old server */ }
     if (what === 'odds-mode') return location.reload();
+    if (what === 'group-deleted') return groupWasDeleted();
     loadLegs(false);
   });
   es.onerror = () => {
