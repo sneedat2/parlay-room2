@@ -41,10 +41,36 @@ async function api(path, opts = {}) {
   }
   const data = await res.json().catch(() => ({}));
   if (res.status === 401 && path !== '/api/login') { signOutLocal(); throw new Error(data.error || 'Please sign in again.'); }
-  if (!res.ok) throw new Error(data.error || `Request failed (${res.status})`);
+  if (!res.ok) {
+    // A Pro feature on a free account: offer the upgrade (the caller still shows the message).
+    if (data.upgrade) showUpgrade(data.error);
+    throw new Error(data.error || `Request failed (${res.status})`);
+  }
   return data;
 }
 const groupApi = (sub, opts) => api(`/api/groups/${state.groupId}${sub}`, opts);
+
+// Every slip has its own sportsbook (FanDuel or DraftKings). Find props shows the odds of the slip
+// props are going to ("Add props to"); the slip on screen uses its own book for prices and Place bet.
+const bookTitle = (k) => state.sportsbooks.find((b) => b.key === k)?.title || 'FanDuel';
+const slipBookKey = (s) => s?.book || state.group?.sportsbook?.key || 'fanduel';
+const addSlip = () => state.slips.find((s) => s.id === state.addSlipId) || currentSlip();
+const bookKey = () => slipBookKey(addSlip());
+const bookName = () => bookTitle(bookKey());
+const viewBookName = () => bookTitle(slipBookKey(currentSlip()));
+
+// When the target slip's book changes (picked another slip, switched its book), reload Find props.
+let findBook = null;
+function syncFindBook() {
+  const k = bookKey();
+  if (findBook && findBook !== k) bookChanged();
+  findBook = k;
+}
+function bookChanged() {
+  state.ladders.clear(); // odds on screen came from the old book
+  if (state.props && state.event && state.market) loadProps();
+  renderMarketView();
+}
 
 // ---------------------------------------------------------------- odds math & helpers
 
@@ -297,6 +323,7 @@ async function loadMe() {
   state.createNeedsCode = data.createNeedsCode;
   state.sportsbooks = data.sportsbooks;
   state.freeLegs = data.limits?.freeLegs || 5;
+  state.billing = data.billing || null;
   document.querySelectorAll('.storage-warning').forEach((p) => { p.hidden = !data.storageWarning; });
   $('#set-password-username').value = data.me.email || data.me.name;
   $('#demo-badge').hidden = !data.demo;
@@ -316,15 +343,93 @@ function showGroups() {
   list.hidden = !state.groups.length;
   $('#owner-panel').hidden = !state.me.owner;
   if (state.me.owner) loadOwner();
+  renderPlan();
   showScreen('groups');
+}
+
+// ---------------------------------------------------------------- Pro: plan card, upgrade, manage
+
+function renderPlan() {
+  const b = state.billing;
+  const card = $('#plan-card');
+  card.hidden = !b?.paidOn;
+  if (card.hidden) return;
+  const btn = $('#plan-action');
+  btn.hidden = false;
+  if (b.canUpgrade) {
+    $('#plan-title').textContent = 'Free plan';
+    $('#plan-text').textContent = `1 group, 1 slip, ${state.freeLegs} legs, main lines. Pro unlocks everything${b.price ? ` for ${b.price}` : ''}.`;
+    btn.textContent = 'Upgrade';
+    btn.className = 'btn primary sm';
+    btn.onclick = startCheckout;
+  } else if (state.me.pro) {
+    $('#plan-title').textContent = 'Pro';
+    $('#plan-text').textContent = b.giftedPro
+      ? 'You have every feature, on the house.'
+      : b.status === 'past_due'
+        ? "Your last payment didn't go through. Update your card to keep Pro."
+        : b.cancelsAt
+          ? `Every feature. Ends ${new Date(b.cancelsAt).toLocaleDateString()}; you won't be charged again.`
+          : 'Every feature unlocked. Thanks for supporting Parlay Room!';
+    btn.hidden = !b.canManage;
+    btn.textContent = 'Manage';
+    btn.className = 'btn ghost sm';
+    btn.onclick = openBillingPortal;
+  } else {
+    // Paid plan is on but payments aren't set up yet.
+    $('#plan-title').textContent = 'Free plan';
+    $('#plan-text').textContent = "Pro isn't available to buy yet.";
+    btn.hidden = true;
+  }
+}
+
+function showUpgrade(reason) {
+  const b = state.billing;
+  if (!b?.canUpgrade) return false;
+  $('#upgrade-reason').textContent = reason || 'Get every feature.';
+  $('#upgrade-go').textContent = b.price ? `Upgrade · ${b.price}` : 'Upgrade';
+  const d = $('#upgrade-dialog');
+  if (!d.open) d.showModal();
+  return true;
+}
+$('#upgrade-go').addEventListener('click', startCheckout);
+
+async function startCheckout() {
+  try {
+    const { url } = await api('/api/billing/checkout', { method: 'POST' });
+    location.href = url; // Stripe's secure payment page; it comes back to the app after
+  } catch (ex) { toast(ex.message); }
+}
+
+async function openBillingPortal() {
+  try {
+    const { url } = await api('/api/billing/portal', { method: 'POST' });
+    location.href = url;
+  } catch (ex) { toast(ex.message); }
+}
+
+// Back from Stripe. Stripe tells the server separately, so give it a few seconds to arrive.
+async function handleBillingReturn() {
+  const result = new URLSearchParams(location.search).get('billing');
+  if (!result) return;
+  history.replaceState(null, '', '/');
+  if (result !== 'success') return toast('No charge made.');
+  toast('Payment received! Unlocking Pro…');
+  for (let i = 0; i < 10 && !state.me?.pro; i++) {
+    await new Promise((r) => setTimeout(r, 2000));
+    try { await loadMe(); } catch { /* try again */ }
+  }
+  toast(state.me?.pro ? 'You have Pro. Enjoy!' : "Pro is still unlocking. Reload in a minute if it isn't on.");
+  if (!$('#groups').hidden) renderPlan();
+  if (state.props) renderOutcomes();
 }
 
 // ---------------------------------------------------------------- owner screen (Pro members)
 
 function renderOwner({ people, limitsOn }) {
   $('#owner-status').textContent = limitsOn
-    ? 'Pro limits are ON. These people get every feature for free (you always do).'
-    : "Pro limits are OFF (testing), so everyone has every feature right now. This list takes effect when PRO_LIMITS is set to on.";
+    ? 'These people get every feature for free (you always do).'
+    : 'The paid plan is off, so everyone has every feature right now. This list takes effect when you turn it on.';
   $('#owner-list').replaceChildren(...(people.length ? people.map((p) => el('li', {},
     el('span', { class: 'owner-who' },
       el('span', {}, p.email),
@@ -337,8 +442,36 @@ function renderOwner({ people, limitsOn }) {
 
 async function loadOwner() {
   try { renderOwner(await api('/api/owner/pro')); } catch (ex) { $('#owner-status').textContent = ex.message; }
+  try { renderOwnerPaid(await api('/api/owner/paid')); } catch (ex) { $('#owner-paid-status').textContent = ex.message; }
   try { renderOwnerOdds(await api('/api/owner/odds')); } catch (ex) { $('#owner-odds-status').textContent = ex.message; }
 }
+
+function renderOwnerPaid({ on, ready, testMode, price, paying }) {
+  const btn = $('#owner-paid-toggle');
+  const setup = ready
+    ? `Stripe ${testMode ? 'TEST mode (no real charges)' : 'LIVE'}${price ? ` · ${price}` : ''} · ${paying} paying`
+    : "Stripe isn't set up yet, so nobody can buy Pro (limits still apply if on).";
+  $('#owner-paid-status').textContent = on
+    ? `ON: free accounts are limited and can upgrade. ${setup}`
+    : `OFF: everyone gets every feature and nobody is asked to pay. ${setup}`;
+  btn.textContent = on ? 'Turn off' : 'Turn on';
+  btn.className = `btn sm ${on ? 'ghost' : 'primary'}`;
+  btn.dataset.on = String(on);
+}
+
+$('#owner-paid-toggle').addEventListener('click', async () => {
+  const btn = $('#owner-paid-toggle');
+  const on = btn.dataset.on !== 'true';
+  btn.disabled = true;
+  try {
+    renderOwnerPaid(await api('/api/owner/paid', { method: 'POST', body: { on } }));
+    toast(on ? 'Paid plan on' : 'Paid plan off: everyone has every feature');
+    await loadMe();
+    renderPlan();
+    renderOwner(await api('/api/owner/pro'));
+  } catch (ex) { toast(ex.message); }
+  btn.disabled = false;
+});
 
 function renderOwnerOdds({ off, noKey, provider }) {
   const btn = $('#owner-odds-toggle');
@@ -347,7 +480,7 @@ function renderOwnerOdds({ off, noKey, provider }) {
     ? 'No odds API key is set, so the app is on demo odds.'
     : off
       ? `OFF: everyone sees demo odds and ${provider} isn't used at all (no credits).`
-      : `ON: real FanDuel odds from ${provider} (uses API credits).`;
+      : `ON: real sportsbook odds from ${provider} (uses API credits).`;
   btn.textContent = off ? 'Turn on' : 'Turn off';
   btn.className = `btn sm ${off ? 'primary' : 'ghost'}`;
   btn.dataset.off = String(!!off);
@@ -474,11 +607,6 @@ function renderGroupHeader() {
   $('#invite-link').textContent = inviteLink(g.code);
   $('#edit-code').hidden = !amLeader() || !$('#code-form').hidden;
   if (!amLeader()) $('#code-form').hidden = true;
-  const bookSel = $('#book-select');
-  bookSel.replaceChildren(...state.sportsbooks.map((b) => el('option', { value: b.key }, b.title)));
-  bookSel.value = g.sportsbook.key;
-  bookSel.disabled = !amLeader();
-  bookSel.title = amLeader() ? '' : 'Only the group leader can change this';
   $('#member-count').textContent = `${g.members.length} member${g.members.length === 1 ? '' : 's'}`;
 
   // Lock switch (leader) / lock status (everyone)
@@ -563,15 +691,6 @@ async function unban(m) {
     toast(`${m.name} can rejoin with the invite code`);
   } catch (ex) { toast(ex.message); }
 }
-
-$('#book-select').addEventListener('change', async (e) => {
-  try {
-    const { group } = await groupApi('/sportsbook', { method: 'POST', body: { sportsbook: e.target.value } });
-    state.group = group;
-    loadLegs(false);
-    toast(`Bets now go to ${group.sportsbook.title}`);
-  } catch (ex) { toast(ex.message); renderGroupHeader(); }
-});
 
 async function copyText(text, done) {
   try { await navigator.clipboard.writeText(text); toast(done); }
@@ -696,7 +815,7 @@ async function loadLegs(fresh) {
   if (forced) { btn.disabled = true; btn.textContent = 'Updating…'; }
   try {
     const data = await groupApi(`/slips${fresh ? `?fresh=${fresh}` : ''}`);
-    if (forced) toast('Odds updated from FanDuel');
+    if (forced) toast(`Odds updated from ${bookTitle(slipBookKey(data.slips.find((s) => s.id === state.slipId)))}`);
     if (gid !== state.groupId) return; // switched groups meanwhile
     if (seq < legsShown) return;       // a newer answer already arrived; don't roll the slip back
     legsShown = seq;
@@ -706,6 +825,7 @@ async function loadLegs(fresh) {
     if (!state.slips.some((s) => s.id === state.slipId)) setSlip(state.slips[0]?.id, false);
     if (!state.slips.some((s) => s.id === state.addSlipId)) state.addSlipId = state.slipId;
     state.group = data.group;
+    syncFindBook(); // someone may have switched the target slip's sportsbook
     renderGroupHeader();
     renderSlip();
     renderAddTo();
@@ -739,6 +859,7 @@ function setSlip(id, render = true) {
   if (id && state.groupId) store(`pr_slip_${state.groupId}`, id);
   resetSlipForms();
   if (render && state.slipData) { renderSlip(); renderAddTo(); if (state.props) renderOutcomes(); }
+  if (state.slipData) syncFindBook(); // Find props switches to this slip's book
 }
 
 function renderSlipTabs() {
@@ -763,13 +884,22 @@ function renderSlip() {
   $('#slip-by').textContent = `Made by ${memberName(slip.createdBy) || 'a former member'}`;
   const manage = canManageSlip(slip);
   $('#rename-slip').hidden = !manage || !$('#rename-slip-form').hidden;
+  // This slip's sportsbook. Whoever can manage the slip can switch it (after an "are you sure?").
+  const book = slipBookKey(slip);
+  $('#slip-book').replaceChildren(...state.sportsbooks.map((b) => el('button', {
+    class: `book-opt${b.key === book ? ' on' : ''}`, type: 'button', 'aria-pressed': String(b.key === book),
+    disabled: b.key !== book && !manage,
+    title: b.key === book ? `${slip.name} uses ${b.title} odds` : manage ? `Switch ${slip.name} to ${b.title}` : 'Only the slip maker or leader can switch books',
+    onclick: () => { if (b.key !== book) askSwitchBook(slip, b); },
+  }, b.title)));
+  document.querySelectorAll('.book-name').forEach((s) => { s.textContent = bookTitle(book); });
   const others = state.slips.filter((s) => s.id !== slip.id);
 
   if (live.length) {
     const dec = live.reduce((acc, l) => acc * toDecimal(l.price), 1);
     $('#parlay-odds').textContent = live.length === 1 ? fmtOdds(live[0].price) : fmtOdds(toAmerican(dec));
     const games = new Set(live.map((l) => l.eventId)).size;
-    const sgp = live.length > games ? ' · same-game legs: FanDuel will reprice' : '';
+    const sgp = live.length > games ? ` · same-game legs: ${viewBookName()} will reprice` : '';
     $('#parlay-sub').textContent = `${live.length}-leg${live.length > 1 ? ' parlay' : ''} · $10 pays $${(10 * dec).toFixed(2)}${sgp}`;
   } else {
     $('#parlay-odds').textContent = '—';
@@ -819,19 +949,19 @@ function renderSlip() {
       el('div', {},
         el('div', { class: 'leg-title' }, leg.label),
         el('div', { class: 'leg-meta' }, `${leg.marketLabel} · ${leg.sportTitle} · ${leg.eventName} · ${fmtTime(leg.commence)}`),
-        leg.unavailable ? el('div', { class: 'leg-meta gone-note' }, 'FanDuel pulled this line') : null),
+        leg.unavailable ? el('div', { class: 'leg-meta gone-note' }, `${viewBookName()} pulled this line`) : null),
       el('div', {}, el('div', { class: 'leg-odds' }, fmtOdds(leg.price)), moved),
       leg.note ? el('p', { class: 'leg-note' }, `“${leg.note}”`) : null,
       el('div', { class: 'leg-foot' },
         el('span', { class: 'by' }, `${who ? who.name : 'Former member'} · ${ago(leg.addedAt)}`),
         el('span', { class: 'actions' },
           leg.link && !leg.unavailable
-            ? el('a', { class: 'btn primary sm', href: leg.link, target: '_blank', rel: 'noopener' }, 'Bet in FanDuel')
+            ? el('a', { class: 'btn primary sm', href: leg.link, target: '_blank', rel: 'noopener' }, `Bet in ${viewBookName()}`)
             : null,
           leg.eventLink && !leg.unavailable
             ? el('a', {
               class: 'btn ghost sm', href: leg.eventLink, target: '_blank', rel: 'noopener',
-              'aria-label': `Open ${leg.eventName} in FanDuel`,
+              'aria-label': `Open ${leg.eventName} in ${viewBookName()}`,
             }, 'Game ↗')
             : null,
           moveTo,
@@ -912,7 +1042,7 @@ $('#boost-stake').addEventListener('input', () => {
 $('#boost-stake').value = store('pr_stake') || '10';
 
 function renderPlaceBet(slip, data, live) {
-  const book = state.group.sportsbook.title;
+  const book = viewBookName();
   const btn = $('#place-bet');
   const note = $('#place-bet-note');
   btn.textContent = `Place bet on ${book}`;
@@ -972,7 +1102,7 @@ function renderSlipGames(live) {
     const count = live.filter((l) => l.eventId === leg.eventId).length;
     return el('a', {
       class: 'slip-game', href: leg.eventLink, target: '_blank', rel: 'noopener',
-      'aria-label': `Open ${leg.eventName} in FanDuel (${count} leg${count === 1 ? '' : 's'})`,
+      'aria-label': `Open ${leg.eventName} in ${viewBookName()} (${count} leg${count === 1 ? '' : 's'})`,
     }, `${label} ↗`, el('span', { class: 'slip-game-count' }, `${count} leg${count === 1 ? '' : 's'}`));
   }));
 }
@@ -1001,7 +1131,7 @@ function renderLegLinks(slip, live) {
           ? el('a', {
             class: `btn sm ${done ? 'ghost' : 'primary'}`, href: leg.link, target: '_blank', rel: 'noopener',
             onclick: () => sendLeg(slip, leg),
-          }, done ? 'Added ✓' : 'Add to FanDuel')
+          }, done ? 'Added ✓' : `Add to ${viewBookName()}`)
           : el('span', { class: 'muted small' }, 'Add this one by hand'),
         leg.eventLink ? el('a', { class: 'btn ghost sm', href: leg.eventLink, target: '_blank', rel: 'noopener' }, 'Game ↗') : null));
   }));
@@ -1084,7 +1214,32 @@ async function moveLeg(slip, leg, toSlipId) {
   loadLegs(false);
 }
 
-$('#refresh').addEventListener('click', () => loadLegs('force'));
+// Update odds now: fresh odds for this slip, and Find props switches to this slip's book with fresh odds too.
+$('#refresh').addEventListener('click', async () => {
+  const before = bookKey();
+  state.addSlipId = state.slipId;
+  renderAddTo();
+  await loadLegs('force');
+  findBook = bookKey();
+  if (findBook !== before || state.props) bookChanged(); // reload what's on screen in this slip's book
+});
+
+// Switch a slip to another sportsbook, after an "are you sure?".
+function askSwitchBook(slip, b) {
+  const n = slip.legs.length;
+  askConfirm(
+    `Switch ${slip.name} to ${b.title}? ${n ? `Its ${n} leg${n === 1 ? '' : 's'} will update to ${b.title}'s odds, and any line ${b.title} doesn't offer will show as pulled.` : `Its odds and Place bet will use ${b.title}.`}`,
+    `Yes, switch to ${b.title}`,
+    async () => {
+      try {
+        await groupApi(`/slips/${slip.id}/book`, { method: 'POST', body: { book: b.key } });
+        state.addSlipId = slip.id; // Find props follows this slip's new book
+        toast(`${slip.name} now uses ${b.title}`);
+      } catch (ex) { toast(ex.message); }
+    },
+  );
+  $('#slip-confirm').scrollIntoView({ block: 'nearest', behavior: 'smooth' }); // it sits under the legs
+}
 
 // One inline "are you sure?" row, shared by Clear slip and Delete slip.
 let confirmAction = null;
@@ -1142,6 +1297,10 @@ $('#new-slip').addEventListener('click', () => {
   $('#new-slip-form').hidden = false;
   $('#new-slip').hidden = true;
   $('#new-slip-name').value = '';
+  // Pick the sportsbook for the new slip; starts on the book of the slip you're looking at.
+  const bookSel = $('#new-slip-book');
+  bookSel.replaceChildren(...state.sportsbooks.map((b) => el('option', { value: b.key }, `${b.title} slip`)));
+  bookSel.value = slipBookKey(currentSlip());
   $('#new-slip-name').focus();
 });
 $('#new-slip-cancel').addEventListener('click', resetSlipForms);
@@ -1149,12 +1308,12 @@ $('#new-slip-form').addEventListener('submit', async (e) => {
   e.preventDefault();
   showError('#new-slip-error');
   try {
-    const { slip } = await groupApi('/slips', { method: 'POST', body: { name: $('#new-slip-name').value } });
+    const { slip } = await groupApi('/slips', { method: 'POST', body: { name: $('#new-slip-name').value, book: $('#new-slip-book').value } });
     state.addSlipId = slip.id; // new slip is where the next props go
     resetSlipForms();
     state.slipId = slip.id;
     store(`pr_slip_${state.groupId}`, slip.id);
-    toast(`${slip.name} created. Props you add now go here.`);
+    toast(`${slip.name} (${bookTitle(slip.book)}) created. Props you add now go here.`);
     loadLegs(false);
   } catch (ex) { showError('#new-slip-error', ex.message); }
 });
@@ -1182,11 +1341,12 @@ $('#rename-slip-form').addEventListener('submit', async (e) => {
 // Finder: which slip new props go on. Follows the slip you're looking at unless you pick another.
 function renderAddTo() {
   const sel = $('#add-to-slip');
-  sel.replaceChildren(...state.slips.map((s) => el('option', { value: s.id }, `${s.name} (${s.legs.length})`)));
+  sel.replaceChildren(...state.slips.map((s) => el('option', { value: s.id }, `${s.name} · ${bookTitle(slipBookKey(s))} (${s.legs.length})`)));
   sel.value = state.addSlipId || state.slipId;
 }
 $('#add-to-slip').addEventListener('change', (e) => {
   state.addSlipId = e.target.value;
+  syncFindBook(); // show the odds of that slip's book
   markLadderAdded();
   if (state.props) renderOutcomes();
 });
@@ -1228,7 +1388,7 @@ async function selectSport(key) {
     if (state.sport !== key) return; // switched sports while loading
     state.events = [...events].sort((a, b) => a.commence.localeCompare(b.commence));
     if (!events.length) {
-      $('#find-status').textContent = 'No upcoming games on FanDuel for this sport.';
+      $('#find-status').textContent = `No upcoming games on ${bookName()} for this sport.`;
       renderGamePicker();
       renderMarketView();
       return;
@@ -1358,7 +1518,7 @@ const LADDER_KINDS = {
   americanfootball: [['tds', 'TDs'], ['player_pass_yds', 'Pass Yards'], ['player_reception_yds', 'Receiving Yards'], ['player_rush_yds', 'Rush Yards'], ['player_receptions', 'Receptions']],
   basketball: [['player_points', 'Points'], ['player_rebounds', 'Rebounds'], ['player_assists', 'Assists'], ['player_threes', 'Threes'], ['player_points_rebounds_assists', 'PRA']],
   baseball: [['batter_home_runs', 'Home Runs'], ['batter_hits', 'Hits'], ['batter_total_bases', 'Total Bases'], ['batter_rbis', 'RBIs'], ['pitcher_strikeouts', 'Strikeouts']],
-  icehockey: [['player_goal_scorer_anytime', 'Goals'], ['player_points', 'Points'], ['player_shots_on_goal', 'Shots'], ['player_assists', 'Assists']],
+  icehockey: [['player_goals', 'Goals'], ['player_points', 'Points'], ['player_shots_on_goal', 'Shots'], ['player_assists', 'Assists']],
 };
 const ladderKinds = () => LADDER_KINDS[(state.sport || '').split('_')[0]] || [];
 const LADDER_FRESH_MS = 2 * 60 * 1000; // same as the server's shared cache
@@ -1395,7 +1555,7 @@ async function loadLadder(eventId, kind, { force = false } = {}) {
   state.ladders.set(id, { loading: true, data: have?.data });
   renderMarketView();
   try {
-    const data = await api(`/api/ladder?sport=${sport}&event=${encodeURIComponent(eventId)}&kind=${kind}`);
+    const data = await api(`/api/ladder?sport=${sport}&event=${encodeURIComponent(eventId)}&kind=${kind}&book=${bookKey()}`);
     state.ladders.set(id, { data, at: Date.now() });
   } catch (ex) {
     state.ladders.set(id, { error: ex.message });
@@ -1423,10 +1583,10 @@ function ladderCell(e, rung, showTop = true) {
 function ladderBody(e, kind) {
   const id = `${e.id}|${kind}`;
   const st = state.ladders.get(id);
-  if (!st || (st.loading && !st.data)) return el('p', { class: 'muted small mk-msg' }, 'Loading FanDuel odds…');
+  if (!st || (st.loading && !st.data)) return el('p', { class: 'muted small mk-msg' }, `Loading ${bookName()} odds…`);
   if (st.error) return el('p', { class: 'muted small mk-msg' }, st.error);
   const d = st.data;
-  if (!d.players.length) return el('p', { class: 'muted small mk-msg' }, `FanDuel isn't offering ${d.marketLabel} for this game yet.`);
+  if (!d.players.length) return el('p', { class: 'muted small mk-msg' }, `${bookName()} isn't offering ${d.marketLabel} for this game yet.`);
   const all = state.seeAll.has(id);
   const shown = all ? d.players : d.players.slice(0, 3);
   let rows;
@@ -1472,7 +1632,7 @@ function renderMarketView() {
     }, label)));
 
   if (!events.length) {
-    box.replaceChildren(kindChips, el('p', { class: 'muted small' }, 'No upcoming games on FanDuel for this sport.'));
+    box.replaceChildren(kindChips, el('p', { class: 'muted small' }, `No upcoming games on ${bookName()} for this sport.`));
     return;
   }
   const days = [...new Set(events.map((e) => dayKey(e.commence)))];
@@ -1530,7 +1690,10 @@ const sportMarkets = () => state.sports.find((s) => s.key === state.sport)?.mark
 // Free accounts can only add main lines of basic markets; the server enforces it too.
 const marketLocked = (market) => !state.me?.pro && !!sportMarkets().find((m) => m.key === market)?.pro;
 const lineLocked = (market, key) => !state.me?.pro && (marketLocked(market) || String(key).startsWith('alt:'));
-const proToast = (what) => toast(`${what} is a Parlay Room Pro feature.`);
+const proToast = (what) => {
+  const msg = `${what} is a Parlay Room Pro feature.`;
+  if (!showUpgrade(msg)) toast(msg);
+};
 
 function renderMarkets() {
   for (const group of ['player', 'game']) {
@@ -1569,11 +1732,11 @@ $('#search').addEventListener('input', () => renderOutcomes());
 
 async function loadProps() {
   if (!state.event || !state.market) return;
-  const want = `${state.event}|${state.market}`;
-  $('#find-status').textContent = 'Loading FanDuel odds…';
+  const want = `${state.event}|${state.market}|${bookKey()}`;
+  $('#find-status').textContent = `Loading ${bookName()} odds…`;
   try {
-    const props = await api(`/api/props?sport=${state.sport}&event=${encodeURIComponent(state.event)}&market=${state.market}`);
-    if (want !== `${state.event}|${state.market}`) return; // user moved on
+    const props = await api(`/api/props?sport=${state.sport}&event=${encodeURIComponent(state.event)}&market=${state.market}&book=${bookKey()}`);
+    if (want !== `${state.event}|${state.market}|${bookKey()}`) return; // user moved on
     state.props = { ...props, sport: state.sport };
     renderOutcomes();
   } catch (ex) {
@@ -1599,8 +1762,8 @@ function renderOutcomes() {
   }
 
   $('#find-status').textContent = !p.outcomes.length
-    ? `FanDuel isn't offering ${p.marketLabel} for this game yet.`
-    : `${rows.length} line${rows.length === 1 ? '' : 's'} · ${p.marketLabel}${p.lastUpdate ? ` · odds as of ${new Date(p.lastUpdate).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}` : ''}`;
+    ? `${bookName()} isn't offering ${p.marketLabel} for this game yet.`
+    : `${rows.length} line${rows.length === 1 ? '' : 's'} · ${p.marketLabel} · ${bookTitle(p.book || bookKey())}${p.lastUpdate ? ` · odds as of ${new Date(p.lastUpdate).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}` : ''}`;
 
   $('#outcomes').replaceChildren(...[...groups].map(([name, outs]) => el('li', { class: 'player-group' },
     [p.event.home, p.event.away].includes(name)
@@ -1869,6 +2032,7 @@ async function boot() {
   if (state.groupId && state.groups.some((g) => g.id === state.groupId)) openGroup(state.groupId);
   else if (state.groups.length === 1) openGroup(state.groups[0].id);
   else showGroups();
+  handleBillingReturn();
 }
 
 document.addEventListener('visibilitychange', () => {

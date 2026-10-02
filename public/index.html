@@ -23,7 +23,7 @@
     <div class="join-card">
       <p class="eyebrow">Group slip</p>
       <h1 class="brand">Parlay Room</h1>
-      <p class="join-copy">Pick FanDuel props together, then load the whole slip into FanDuel with one tap.</p>
+      <p class="join-copy">Pick props together on FanDuel or DraftKings, then load the slip into your sportsbook with one tap.</p>
 
       <div id="invite-banner" class="invite-banner" hidden>
         <p class="eyebrow">You're invited</p>
@@ -142,6 +142,15 @@
 
       <ul id="group-list" class="group-list"></ul>
 
+      <!-- Your plan (only while the paid plan is on) -->
+      <div id="plan-card" class="plan-card" hidden>
+        <div>
+          <strong id="plan-title"></strong>
+          <p id="plan-text" class="muted small"></p>
+        </div>
+        <button id="plan-action" class="btn sm" type="button"></button>
+      </div>
+
       <div class="group-forms">
         <form id="create-form" class="group-form" autocomplete="off">
           <h2 class="form-title">Create a group</h2>
@@ -169,6 +178,13 @@
       <!-- Only the app's owner sees this (OWNER_EMAIL). -->
       <details id="owner-panel" class="owner-panel" hidden>
         <summary>Owner · Live odds &amp; Pro members</summary>
+        <div class="owner-odds">
+          <div>
+            <strong>Paid plan (Pro)</strong>
+            <p id="owner-paid-status" class="muted small"></p>
+          </div>
+          <button id="owner-paid-toggle" class="btn sm" type="button"></button>
+        </div>
         <div class="owner-odds">
           <div>
             <strong>Live odds</strong>
@@ -235,6 +251,8 @@
           <label for="new-slip-name" class="field-label">Name the new slip</label>
           <div class="slip-name-row">
             <input id="new-slip-name" maxlength="32" placeholder="Sunday SGP" required>
+            <label for="new-slip-book" class="sr-only">Sportsbook</label>
+            <select id="new-slip-book" class="new-slip-book"></select>
             <button class="btn primary sm" type="submit">Create</button>
             <button id="new-slip-cancel" class="btn ghost sm" type="button">Cancel</button>
           </div>
@@ -249,6 +267,8 @@
               <p class="slip-odds"><span id="parlay-odds">—</span></p>
               <p id="parlay-sub" class="muted">No legs yet</p>
               <p id="leg-cap" class="leg-cap" hidden></p>
+              <!-- This slip's sportsbook: its odds, Find props odds and Place bet all use it -->
+              <div id="slip-book" class="slip-book" role="group" aria-label="Sportsbook for this slip"></div>
             </div>
             <div class="slip-actions">
               <button id="rename-slip" class="btn ghost sm" type="button" hidden>Rename</button>
@@ -306,7 +326,7 @@
                   <span id="boost-extra" class="boost-extra small"></span>
                 </div>
               </div>
-              <p id="boost-note" class="muted small boost-note">Estimate only. A profit boost raises your winnings, not your stake, and FanDuel may cap the extra winnings.</p>
+              <p id="boost-note" class="muted small boost-note">Estimate only. A profit boost raises your winnings, not your stake, and <span class="book-name">FanDuel</span> may cap the extra winnings.</p>
             </div>
           </div>
 
@@ -324,10 +344,10 @@
           <!-- Reliable fallback: FanDuel's one-leg links, tapped one after another, build the betslip -->
           <div id="leg-links" class="leg-links" hidden>
             <button id="leg-links-toggle" class="leg-links-toggle" type="button" aria-expanded="false" aria-controls="leg-links-panel">
-              Add legs to FanDuel one at a time <span class="caret" aria-hidden="true">▾</span>
+              Add legs to <span class="book-name">FanDuel</span> one at a time <span class="caret" aria-hidden="true">▾</span>
             </button>
             <div id="leg-links-panel" class="leg-links-panel" hidden>
-              <p class="muted small">If FanDuel only shows some legs, tap each one here in order. FanDuel adds it to your betslip; come back for the next.</p>
+              <p class="muted small">If <span class="book-name">FanDuel</span> only shows some legs, tap each one here in order. <span class="book-name">FanDuel</span> adds it to your betslip; come back for the next.</p>
               <ol id="leg-links-list" class="leg-links-list"></ol>
             </div>
           </div>
@@ -337,7 +357,7 @@
             </button>
             <div id="placed-panel" class="placed-panel" hidden>
               <ul id="placed-list" class="placed-list"></ul>
-              <p class="muted small placed-note">Shows who tapped Place bet on this slip. The app can't see FanDuel, so it can't confirm the bet went through.</p>
+              <p class="muted small placed-note">Shows who tapped Place bet on this slip. The app can't see <span class="book-name">FanDuel</span>, so it can't confirm the bet went through.</p>
             </div>
           </div>
           <div id="slip-confirm" class="slip-confirm" hidden>
@@ -393,10 +413,6 @@
               <li>Tap <strong>Add to Home Screen</strong>, then <strong>Add</strong>.</li>
               <li>Open Parlay Room from its new icon and tap <strong>Turn on</strong> here.</li>
             </ol>
-          </div>
-          <div class="book-row">
-            <label for="book-select" class="muted small">Sportsbook</label>
-            <select id="book-select"></select>
           </div>
           <div class="lock-row">
             <div>
@@ -458,6 +474,24 @@
   </div>
 
   <div id="toast" class="toast" role="status" hidden></div>
+
+  <!-- Upgrade to Pro (opens when a free account taps a Pro feature) -->
+  <dialog id="upgrade-dialog" class="upgrade-dialog" aria-labelledby="upgrade-title">
+    <form method="dialog">
+      <h2 id="upgrade-title" class="form-title">Parlay Room Pro</h2>
+      <p id="upgrade-reason" class="muted"></p>
+      <ul class="upgrade-list">
+        <li>Unlimited groups and slips</li>
+        <li>More than 5 legs on a slip</li>
+        <li>Alt lines, milestones and every market</li>
+      </ul>
+      <div class="upgrade-actions">
+        <button class="btn ghost" value="cancel" type="submit">Not now</button>
+        <button id="upgrade-go" class="btn primary" type="button"></button>
+      </div>
+      <p class="muted small">Secure checkout by Stripe. Cancel anytime.</p>
+    </form>
+  </dialog>
 
   <script src="/teams.js"></script>
   <script src="/app.js"></script>
