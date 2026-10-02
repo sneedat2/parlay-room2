@@ -921,7 +921,9 @@ function draftKingsLink(legs) {
   if (!ids.length) return { url: null, linked: 0, missing };
   // One leg: DraftKings' own link, untouched. Several: joined with "+" (DK_MULTI_JOIN can change it).
   if (ids.length === 1) return { url: links[0], linked: 1, missing };
-  return { url: `${base}?outcomes=${ids.map(encodeURIComponent).join(DK_MULTI_JOIN)}`, linked: ids.length, missing };
+  // Game lines first, player props (codes with "#") last: the order DraftKings is known to accept.
+  const ordered = [...ids.filter((id) => !id.includes('#')), ...ids.filter((id) => id.includes('#'))];
+  return { url: `${base}?outcomes=${ordered.map(encodeURIComponent).join(DK_MULTI_JOIN)}`, linked: ids.length, missing };
 }
 
 // ---------------------------------------------------------------- FanDuel betslip codes (SGO + Odds API mix)
@@ -1884,7 +1886,8 @@ async function handleApi(req, res, url) {
 // Built from the same getProps() data (and shared cache) as the rest of the app, so every box
 // adds exactly the same leg as picking it the normal way.
 
-const cellOf = (market, o) => ({ market, key: o.key, price: o.price, label: o.label });
+// noCode: the book gave no betslip code for this line, so Place bet can't load it (added by hand).
+const cellOf = (market, o) => ({ market, key: o.key, price: o.price, label: o.label, noCode: !o.link });
 
 async function getLadder(sport, eventId, kind, book = 'fanduel') {
   if (kind === 'tds') return tdColumns(sport, eventId, book);
