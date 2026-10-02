@@ -901,8 +901,11 @@ function parlayLink(legs, book = 'fanduel') {
 
 // DraftKings betslip links look like sportsbook.draftkings.com/event/123?outcomes=ID. Several legs go
 // in one link as outcomes=ID1+ID2. DraftKings gives these codes for game lines, but for few player props.
+const DK_MULTI_JOIN = process.env.DK_MULTI_JOIN || '+';
+const oneGamePage = (legs) => (legs.length && legs.every((l) => l.eventId === legs[0].eventId) ? legs[0].eventLink || null : null);
 function draftKingsLink(legs) {
   const ids = [];
+  const links = [];
   const missing = [];
   let base = null;
   for (const leg of legs) {
@@ -912,11 +915,13 @@ function draftKingsLink(legs) {
       id = u.searchParams.get('outcomes');
       if (id && !base) base = `${u.origin}${u.pathname}`;
     } catch { /* no link */ }
-    if (id) ids.push(id);
+    if (id) { ids.push(id); links.push(leg.link); }
     else missing.push(leg.player ? `${leg.label} ${leg.marketLabel}` : leg.label);
   }
   if (!ids.length) return { url: null, linked: 0, missing };
-  return { url: `${base}?outcomes=${ids.map(encodeURIComponent).join('+')}`, linked: ids.length, missing };
+  // One leg: DraftKings' own link, untouched. Several: joined with "+" (DK_MULTI_JOIN can change it).
+  if (ids.length === 1) return { url: links[0], linked: 1, missing };
+  return { url: `${base}?outcomes=${ids.map(encodeURIComponent).join(DK_MULTI_JOIN)}`, linked: ids.length, missing };
 }
 
 // ---------------------------------------------------------------- FanDuel betslip codes (SGO + Odds API mix)
@@ -1668,7 +1673,9 @@ async function handleApi(req, res, url) {
           legs: s.legs.map(({ fd, fdTriedAt, ...leg }) => ({ ...leg, link: legBetLink({ ...leg, fd }) })),
           // Place bet: load every leg FanDuel gave a betslip code for; the rest are listed to add by hand.
           placeBet: {
-            url: link.url || book.home,
+            // No betslip codes at all (e.g. DraftKings player props): open the game's page if the
+            // slip is one game, so people land right where they add the legs, not the home page.
+            url: link.url || oneGamePage(s.legs.filter((l) => !l.unavailable)) || book.home,
             loadsSlip: !!link.url && !link.missing.length,
             linked: link.linked,
             missing: link.missing,
