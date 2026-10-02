@@ -1,0 +1,499 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>Parlay Room</title>
+  <link rel="manifest" href="/manifest.webmanifest">
+  <link rel="icon" type="image/png" sizes="32x32" href="/favicon-32.png">
+  <link rel="apple-touch-icon" href="/apple-touch-icon.png">
+  <meta name="theme-color" content="#0e1411">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="Parlay Room">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Barlow:wght@400;500;600&family=Barlow+Condensed:wght@600;700&display=swap">
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <!-- Sign in -->
+  <main id="login" class="join" hidden>
+    <div class="join-card">
+      <p class="eyebrow">Group slip</p>
+      <h1 class="brand">Parlay Room</h1>
+      <p class="join-copy">Pick props together on FanDuel or DraftKings, then load the slip into your sportsbook with one tap.</p>
+
+      <div id="invite-banner" class="invite-banner" hidden>
+        <p class="eyebrow">You're invited</p>
+        <p id="invite-banner-text" class="invite-banner-text"></p>
+      </div>
+
+      <div class="mode-tabs" role="tablist" aria-label="Sign in or create account">
+        <button id="mode-signin" class="mode-tab" type="button" role="tab" aria-selected="true">Sign in</button>
+        <button id="mode-signup" class="mode-tab" type="button" role="tab" aria-selected="false">Create account</button>
+      </div>
+
+      <!-- Sign in -->
+      <form id="signin-form" class="auth-form" method="post" action="/login">
+        <label for="signin-login">Email</label>
+        <input id="signin-login" name="username" type="text" inputmode="email" autocomplete="username" autocapitalize="none" spellcheck="false" required>
+        <span class="hint">Made your account before emails? Enter your name instead.</span>
+        <label for="signin-password">Password</label>
+        <div class="pw-wrap">
+          <input id="signin-password" name="password" type="password" autocomplete="current-password" required>
+          <button class="pw-toggle" type="button" aria-label="Show password">Show</button>
+        </div>
+        <span class="hint">Still on an old PIN? Enter it here, and you'll pick a password next.</span>
+        <p id="signin-error" class="error" role="alert" hidden></p>
+        <button class="btn primary" type="submit">Sign in</button>
+        <button id="show-forgot" class="link-btn center" type="button">Forgot password?</button>
+      </form>
+
+      <!-- Create account -->
+      <form id="signup-form" class="auth-form" method="post" action="/signup" hidden>
+        <label for="signup-name">Your name <span class="hint">what your group sees</span></label>
+        <input id="signup-name" name="name" maxlength="24" autocomplete="nickname" required>
+        <label for="signup-email">Email <span class="hint">for signing in and resetting your password</span></label>
+        <input id="signup-email" name="username" type="email" autocomplete="username" autocapitalize="none" spellcheck="false" required>
+        <label for="signup-password">Password <span class="hint">at least 8 characters</span></label>
+        <div class="pw-wrap">
+          <input id="signup-password" name="new-password" type="password" autocomplete="new-password" minlength="8" required>
+          <button class="pw-toggle" type="button" aria-label="Show password">Show</button>
+        </div>
+        <p id="signup-error" class="error" role="alert" hidden></p>
+        <button class="btn primary" type="submit">Create account</button>
+      </form>
+
+      <!-- Forgot password -->
+      <form id="forgot-form" class="auth-form" hidden>
+        <h2 class="form-title">Reset your password</h2>
+        <p class="muted small">We'll email you a 6-digit code.</p>
+        <label for="forgot-email">Email</label>
+        <input id="forgot-email" type="email" autocomplete="email" required>
+        <p id="forgot-error" class="error" role="alert" hidden></p>
+        <button class="btn primary" type="submit">Email me a code</button>
+        <button class="link-btn center back-to-signin" type="button">Back to sign in</button>
+      </form>
+
+      <form id="reset-form" class="auth-form" method="post" action="/reset" hidden>
+        <h2 class="form-title">Enter your code</h2>
+        <!-- Tells password managers which account the new password belongs to. -->
+        <input id="reset-username" name="username" type="email" autocomplete="username" class="visually-hidden" tabindex="-1" aria-hidden="true" readonly>
+        <p id="reset-sent" class="muted small"></p>
+        <label for="reset-code">6-digit code</label>
+        <input id="reset-code" inputmode="numeric" maxlength="6" autocomplete="one-time-code" class="code-input" required>
+        <label for="reset-password">New password <span class="hint">at least 8 characters</span></label>
+        <div class="pw-wrap">
+          <input id="reset-password" name="new-password" type="password" autocomplete="new-password" minlength="8" required>
+          <button class="pw-toggle" type="button" aria-label="Show password">Show</button>
+        </div>
+        <p id="reset-error" class="error" role="alert" hidden></p>
+        <button class="btn primary" type="submit">Set new password</button>
+        <button id="resend-code" class="link-btn center" type="button">Send a new code</button>
+        <button class="link-btn center back-to-signin" type="button">Back to sign in</button>
+      </form>
+    </div>
+  </main>
+
+  <!-- Add email (accounts made before email sign-in) -->
+  <main id="add-email" class="join" hidden>
+    <form id="add-email-form" class="join-card" autocomplete="off">
+      <p class="eyebrow">One quick thing</p>
+      <h1 class="brand">Add your email</h1>
+      <p class="join-copy">You'll sign in with your email from now on, and it lets you reset your password if you forget it.</p>
+      <label for="add-email-input">Email</label>
+      <input id="add-email-input" type="email" autocomplete="email" required>
+      <p id="add-email-error" class="error" role="alert" hidden></p>
+      <button class="btn primary" type="submit">Save email</button>
+    </form>
+  </main>
+
+  <!-- Set a password (accounts still on an old PIN) -->
+  <main id="set-password" class="join" hidden>
+    <form id="set-password-form" class="join-card" method="post" action="/password">
+      <input id="set-password-username" name="username" type="email" autocomplete="username" class="visually-hidden" tabindex="-1" aria-hidden="true" readonly>
+      <p class="eyebrow">One quick thing</p>
+      <h1 class="brand">Pick a password</h1>
+      <p class="join-copy">Parlay Room uses passwords now instead of PINs. Choose one with at least 8 characters.</p>
+      <label for="set-password-input">New password</label>
+      <div class="pw-wrap">
+        <input id="set-password-input" name="new-password" type="password" autocomplete="new-password" minlength="8" required>
+        <button class="pw-toggle" type="button" aria-label="Show password">Show</button>
+      </div>
+      <p id="set-password-error" class="error" role="alert" hidden></p>
+      <button class="btn primary" type="submit">Save password</button>
+    </form>
+  </main>
+
+  <!-- Groups -->
+  <main id="groups" class="join" hidden>
+    <div class="join-card wide">
+      <div class="groups-head">
+        <div>
+          <p class="eyebrow">Signed in as <span id="groups-me"></span></p>
+          <h1 class="brand">Your groups</h1>
+        </div>
+        <button id="groups-logout" class="link-btn" type="button">Sign out</button>
+      </div>
+
+      <p class="storage-warning" hidden>Heads up: this server isn't saving data permanently. Accounts, passwords and groups get erased every time the app updates. In Railway, attach a volume to the service to fix it.</p>
+
+      <ul id="group-list" class="group-list"></ul>
+
+      <!-- Your plan (only while the paid plan is on) -->
+      <div id="plan-card" class="plan-card" hidden>
+        <div>
+          <strong id="plan-title"></strong>
+          <p id="plan-text" class="muted small"></p>
+        </div>
+        <button id="plan-action" class="btn sm" type="button"></button>
+      </div>
+
+      <div class="group-forms">
+        <form id="create-form" class="group-form" autocomplete="off">
+          <h2 class="form-title">Create a group</h2>
+          <p class="muted small">You'll be the leader and get an invite code to share.</p>
+          <label for="create-name">Group name</label>
+          <input id="create-name" maxlength="32" placeholder="Sunday Sweats" required>
+          <div id="create-code-wrap" hidden>
+            <label for="create-code">Create code <span class="hint">from whoever runs this app</span></label>
+            <input id="create-code">
+          </div>
+          <p id="create-error" class="error" role="alert" hidden></p>
+          <button class="btn primary" type="submit">Create group</button>
+        </form>
+
+        <form id="join-form" class="group-form" autocomplete="off">
+          <h2 class="form-title">Join a group</h2>
+          <p class="muted small">Ask the group leader for the invite code.</p>
+          <label for="join-code">Invite code</label>
+          <input id="join-code" maxlength="12" class="code-input" placeholder="K7MX2Q" required>
+          <p id="join-error" class="error" role="alert" hidden></p>
+          <button class="btn ghost" type="submit">Join group</button>
+        </form>
+      </div>
+
+      <!-- Only the app's owner sees this (OWNER_EMAIL). -->
+      <details id="owner-panel" class="owner-panel" hidden>
+        <summary>Owner · Live odds &amp; Pro members</summary>
+        <div class="owner-odds">
+          <div>
+            <strong>Paid plan (Pro)</strong>
+            <p id="owner-paid-status" class="muted small"></p>
+          </div>
+          <button id="owner-paid-toggle" class="btn sm" type="button"></button>
+        </div>
+        <div class="owner-odds">
+          <div>
+            <strong>Live odds</strong>
+            <p id="owner-odds-status" class="muted small"></p>
+          </div>
+          <button id="owner-odds-toggle" class="btn sm" type="button"></button>
+        </div>
+        <h3 class="owner-sub">Pro members</h3>
+        <p id="owner-status" class="muted small"></p>
+        <form id="owner-form" class="owner-form" autocomplete="off">
+          <label for="owner-email" class="sr-only">Email to give Pro</label>
+          <input id="owner-email" type="email" placeholder="friend@email.com" required>
+          <button class="btn primary sm" type="submit">Give Pro</button>
+        </form>
+        <p id="owner-error" class="error" role="alert" hidden></p>
+        <ul id="owner-list" class="owner-list"></ul>
+      </details>
+    </div>
+  </main>
+
+  <!-- App -->
+  <div id="app" class="app" hidden>
+    <header class="topbar">
+      <div class="brand-row">
+        <button id="switch-group" class="group-switch" type="button" aria-label="Switch group">
+          <span id="group-name" class="brand small"></span>
+          <span class="caret" aria-hidden="true">▾</span>
+        </button>
+        <span id="demo-badge" class="pill warn" hidden>Demo odds</span>
+      </div>
+      <div class="who">
+        <span id="me-name"></span>
+      </div>
+    </header>
+
+    <p class="storage-warning" hidden>Heads up: this server isn't saving data permanently. Accounts, passwords and groups get erased every time the app updates. In Railway, attach a volume to the service to fix it.</p>
+
+    <nav class="tabs" aria-label="Sections">
+      <button class="tab" data-tab="slip" aria-selected="true" type="button">Slips <span id="tab-count" class="count">0</span></button>
+      <button class="tab" data-tab="find" aria-selected="false" type="button">Find props</button>
+    </nav>
+
+    <div class="panels">
+      <!-- Slip -->
+      <section id="panel-slip" class="panel" data-panel="slip">
+        <div id="notify-card" class="notify-card" hidden>
+          <div class="notify-text">
+            <strong>Get a ping when someone adds a leg</strong>
+            <span id="notify-card-sub" class="muted small">Even when the app is closed.</span>
+          </div>
+          <div class="notify-actions">
+            <button id="notify-card-on" class="btn primary sm" type="button">Turn on</button>
+            <button id="notify-card-later" class="link-btn" type="button">Not now</button>
+          </div>
+        </div>
+        <p id="view-only" class="view-only" hidden></p>
+
+        <!-- Slip switcher: one tab per named slip -->
+        <div class="slip-switcher">
+          <div id="slip-tabs" class="slip-tabs" role="tablist" aria-label="Slips"></div>
+          <button id="new-slip" class="btn ghost sm new-slip" type="button">+ New slip</button>
+        </div>
+        <form id="new-slip-form" class="slip-name-form" autocomplete="off" hidden>
+          <label for="new-slip-name" class="field-label">Name the new slip</label>
+          <div class="slip-name-row">
+            <input id="new-slip-name" maxlength="32" placeholder="Sunday SGP" required>
+            <label for="new-slip-book" class="sr-only">Sportsbook</label>
+            <select id="new-slip-book" class="new-slip-book"></select>
+            <button class="btn primary sm" type="submit">Create</button>
+            <button id="new-slip-cancel" class="btn ghost sm" type="button">Cancel</button>
+          </div>
+          <p id="new-slip-error" class="error" role="alert" hidden></p>
+        </form>
+
+        <div class="slip">
+          <div class="slip-head">
+            <div class="slip-title">
+              <p id="slip-by" class="eyebrow"></p>
+              <h2 id="slip-name" class="slip-name"></h2>
+              <p class="slip-odds"><span id="parlay-odds">—</span></p>
+              <p id="parlay-sub" class="muted">No legs yet</p>
+              <p id="leg-cap" class="leg-cap" hidden></p>
+              <!-- This slip's sportsbook: its odds, Find props odds and Place bet all use it -->
+              <div id="slip-book" class="slip-book" role="group" aria-label="Sportsbook for this slip"></div>
+            </div>
+            <div class="slip-actions">
+              <button id="rename-slip" class="btn ghost sm" type="button" hidden>Rename</button>
+              <button id="refresh" class="btn ghost sm" type="button">Update odds now</button>
+            </div>
+          </div>
+          <form id="rename-slip-form" class="slip-name-form inline" autocomplete="off" hidden>
+            <label for="rename-slip-name" class="field-label">New name</label>
+            <div class="slip-name-row">
+              <input id="rename-slip-name" maxlength="32" required>
+              <button class="btn primary sm" type="submit">Save</button>
+              <button id="rename-slip-cancel" class="btn ghost sm" type="button">Cancel</button>
+            </div>
+            <p id="rename-slip-error" class="error" role="alert" hidden></p>
+          </form>
+          <ol id="legs" class="legs"></ol>
+          <div class="slip-foot">
+            <span class="muted small"><span id="live-status" class="live" hidden>Live</span> <span id="updated"></span></span>
+            <span id="quota" class="muted small"></span>
+          </div>
+
+          <!-- Profit boost calculator: folded by default, estimate only, all on this device -->
+          <div id="boost-wrap" class="boost-wrap" hidden>
+            <button id="boost-toggle" class="boost-toggle" type="button" aria-expanded="false" aria-controls="boost">
+              <span class="boost-toggle-title">Profit boost calculator</span>
+              <span id="boost-summary" class="boost-summary"></span>
+              <span class="caret" aria-hidden="true">▾</span>
+            </button>
+            <div id="boost" class="boost" hidden>
+              <div class="boost-head">
+                <label for="boost-range" class="boost-label">Profit boost</label>
+                <span id="boost-pct" class="boost-pct">No boost</span>
+              </div>
+              <input id="boost-range" type="range" min="0" max="105" step="5" value="0" aria-describedby="boost-note">
+              <div class="boost-chips" role="group" aria-label="Common boosts">
+                <button class="chip sm" type="button" data-boost="0">None</button>
+                <button class="chip sm" type="button" data-boost="25">25%</button>
+                <button class="chip sm" type="button" data-boost="30">30%</button>
+                <button class="chip sm" type="button" data-boost="50">50%</button>
+                <button class="chip sm" type="button" data-boost="100">100%</button>
+              </div>
+              <div class="boost-grid">
+                <div class="boost-cell">
+                  <span class="boost-cap">Boosted odds</span>
+                  <span id="boost-odds" class="boost-odds"></span>
+                  <span id="boost-from" class="muted small"></span>
+                </div>
+                <div class="boost-cell">
+                  <label for="boost-stake" class="boost-cap">Stake</label>
+                  <span class="stake-wrap">$<input id="boost-stake" inputmode="decimal" value="10" maxlength="8" autocomplete="off"></span>
+                </div>
+                <div class="boost-cell">
+                  <span class="boost-cap">Pays</span>
+                  <span id="boost-pays" class="boost-pays"></span>
+                  <span id="boost-extra" class="boost-extra small"></span>
+                </div>
+              </div>
+              <p id="boost-note" class="muted small boost-note">Estimate only. A profit boost raises your winnings, not your stake, and <span class="book-name">FanDuel</span> may cap the extra winnings.</p>
+            </div>
+          </div>
+
+          <div class="bet-row">
+            <a id="place-bet" class="btn primary place-bet" target="_blank" rel="noopener" aria-disabled="true">Place bet</a>
+            <button id="clear" class="btn danger-ghost" type="button" hidden>Clear slip</button>
+            <button id="delete-slip" class="btn danger-ghost" type="button" hidden>Delete slip</button>
+          </div>
+          <!-- Fallback when betslip codes don't load: open each game's page on FanDuel -->
+          <div id="slip-games" class="slip-games" hidden>
+            <span class="slip-games-label">Games on this slip</span>
+            <div id="slip-games-list" class="slip-games-list"></div>
+          </div>
+
+          <!-- Reliable fallback: FanDuel's one-leg links, tapped one after another, build the betslip -->
+          <div id="leg-links" class="leg-links" hidden>
+            <button id="leg-links-toggle" class="leg-links-toggle" type="button" aria-expanded="false" aria-controls="leg-links-panel">
+              Add legs to <span class="book-name">FanDuel</span> one at a time <span class="caret" aria-hidden="true">▾</span>
+            </button>
+            <div id="leg-links-panel" class="leg-links-panel" hidden>
+              <p class="muted small">If <span class="book-name">FanDuel</span> only shows some legs, tap each one here in order. <span class="book-name">FanDuel</span> adds it to your betslip; come back for the next.</p>
+              <ol id="leg-links-list" class="leg-links-list"></ol>
+            </div>
+          </div>
+          <div id="placed" class="placed" hidden>
+            <button id="placed-toggle" class="placed-chip" type="button" aria-expanded="false" aria-controls="placed-panel">
+              Placed · <span id="placed-count">0</span> <span class="caret" aria-hidden="true">▾</span>
+            </button>
+            <div id="placed-panel" class="placed-panel" hidden>
+              <ul id="placed-list" class="placed-list"></ul>
+              <p class="muted small placed-note">Shows who tapped Place bet on this slip. The app can't see <span class="book-name">FanDuel</span>, so it can't confirm the bet went through.</p>
+            </div>
+          </div>
+          <div id="slip-confirm" class="slip-confirm" hidden>
+            <span id="slip-confirm-text" class="small"></span>
+            <button id="slip-confirm-yes" class="btn danger sm" type="button"></button>
+            <button id="slip-confirm-no" class="btn ghost sm" type="button">Cancel</button>
+          </div>
+          <p id="place-bet-note" class="muted small bet-note" hidden></p>
+        </div>
+
+        <details id="group-info" class="group-info">
+          <summary><span>Invite, members &amp; notifications</span> <span id="member-count" class="muted small"></span></summary>
+          <div class="invite-link">
+            <span class="muted small">Invite link</span>
+            <span id="invite-link" class="invite-link-text"></span>
+            <div class="invite-link-actions">
+              <button id="share-link" class="btn primary sm" type="button">Share invite link</button>
+              <button id="copy-link" class="btn ghost sm" type="button">Copy link</button>
+            </div>
+          </div>
+          <div class="invite">
+            <span class="muted small">Invite code</span>
+            <span id="invite-code" class="invite-code"></span>
+            <button id="copy-code" class="btn ghost sm" type="button">Copy</button>
+            <button id="edit-code" class="btn ghost sm" type="button" hidden>Change code</button>
+          </div>
+          <form id="code-form" class="code-form" hidden>
+            <label for="code-input" class="muted small">New invite code <span class="hint">4–12 letters or numbers</span></label>
+            <div class="code-form-row">
+              <input id="code-input" class="code-input" maxlength="12" autocomplete="off">
+              <button class="btn primary sm" type="submit">Save</button>
+              <button id="random-code" class="btn ghost sm" type="button">Random</button>
+              <button id="cancel-code" class="btn ghost sm" type="button">Cancel</button>
+            </div>
+            <p class="muted small">The old code and old invite links stop working as soon as you save.</p>
+            <p id="code-error" class="error" role="alert" hidden></p>
+          </form>
+          <div class="notify-row">
+            <div>
+              <span class="notify-row-title">Notifications</span>
+              <span id="notify-status" class="muted small"></span>
+            </div>
+            <div class="notify-actions">
+              <button id="notify-on" class="btn primary sm" type="button" hidden>Turn on</button>
+              <button id="notify-test" class="btn ghost sm" type="button" hidden>Send test</button>
+              <button id="notify-off" class="btn ghost sm" type="button" hidden>Turn off</button>
+            </div>
+          </div>
+          <div id="ios-install" class="ios-install" hidden>
+            <strong>On iPhone, add Parlay Room to your Home Screen first:</strong>
+            <ol>
+              <li>In Safari, tap the <strong>Share</strong> button (square with an arrow).</li>
+              <li>Tap <strong>Add to Home Screen</strong>, then <strong>Add</strong>.</li>
+              <li>Open Parlay Room from its new icon and tap <strong>Turn on</strong> here.</li>
+            </ol>
+          </div>
+          <div class="lock-row">
+            <div>
+              <span class="notify-row-title">Who can change slips</span>
+              <span id="lock-status" class="muted small"></span>
+            </div>
+            <button id="lock-toggle" class="btn ghost sm" type="button" hidden></button>
+          </div>
+          <ul id="members" class="members"></ul>
+          <div id="removed-wrap" hidden>
+            <p class="eyebrow removed-title">Removed</p>
+            <ul id="removed" class="members"></ul>
+          </div>
+          <div class="leave-row">
+            <button id="leave" class="btn danger-ghost sm" type="button">Leave group</button>
+            <span id="leave-confirm" hidden>
+              <span class="small">Leave this group?</span>
+              <button id="leave-yes" class="btn danger sm" type="button">Leave</button>
+              <button id="leave-no" class="btn ghost sm" type="button">Cancel</button>
+            </span>
+          </div>
+        </details>
+      </section>
+
+      <!-- Find -->
+      <section id="panel-find" class="panel" data-panel="find">
+        <div class="finder">
+          <div class="add-to">
+            <label for="add-to-slip" class="field-label">Add props to</label>
+            <select id="add-to-slip"></select>
+          </div>
+          <div id="sports" class="chips" role="tablist" aria-label="Sport"></div>
+          <div class="view-switch" role="tablist" aria-label="How to browse">
+            <button id="view-game" class="view-tab" type="button" role="tab" aria-selected="true">By game</button>
+            <button id="view-market" class="view-tab" type="button" role="tab" aria-selected="false">By market</button>
+          </div>
+
+          <!-- By game: pick one game, then a market -->
+          <div id="by-game" class="by-game">
+            <div id="game-picker" class="game-picker"></div>
+            <div class="market-row">
+              <span class="row-label">Player props</span>
+              <div id="markets-player" class="chips scroll" role="tablist" aria-label="Player props"></div>
+            </div>
+            <div class="market-row">
+              <span class="row-label">Game lines</span>
+              <div id="markets-game" class="chips scroll" role="tablist" aria-label="Game lines"></div>
+            </div>
+            <input id="search" type="search" placeholder="Search a player or team" aria-label="Search player or team">
+            <p id="find-status" class="muted small"></p>
+            <ul id="outcomes" class="outcomes"></ul>
+          </div>
+
+          <!-- By market: pick a category (TDs, Rush Yards...), see every game's players as ladders -->
+          <div id="by-market" class="by-market" hidden></div>
+        </div>
+      </section>
+    </div>
+  </div>
+
+  <div id="toast" class="toast" role="status" hidden></div>
+
+  <!-- Upgrade to Pro (opens when a free account taps a Pro feature) -->
+  <dialog id="upgrade-dialog" class="upgrade-dialog" aria-labelledby="upgrade-title">
+    <form method="dialog">
+      <h2 id="upgrade-title" class="form-title">Parlay Room Pro</h2>
+      <p id="upgrade-reason" class="muted"></p>
+      <ul class="upgrade-list">
+        <li>Unlimited groups and slips</li>
+        <li>More than 5 legs on a slip</li>
+        <li>Alt lines, milestones and every market</li>
+      </ul>
+      <div class="upgrade-actions">
+        <button class="btn ghost" value="cancel" type="submit">Not now</button>
+        <button id="upgrade-go" class="btn primary" type="button"></button>
+      </div>
+      <p class="muted small">Secure checkout by Stripe. Cancel anytime.</p>
+    </form>
+  </dialog>
+
+  <script src="/teams.js"></script>
+  <script src="/app.js"></script>
+</body>
+</html>

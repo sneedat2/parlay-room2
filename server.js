@@ -327,14 +327,27 @@ function migrateSingleGroup() {
 }
 
 // Groups used to have one slip (group.legs). Now each group has named slips; old legs become "Main slip".
-const newSlip = (name, createdBy, legs = []) => ({ id: newId(), name, createdBy, createdAt: new Date().toISOString(), legs, rev: 0, placements: {} });
+const newSlip = (name, createdBy, book = 'fanduel', legs = []) => ({ id: newId(), name, createdBy, book, createdAt: new Date().toISOString(), legs, rev: 0, placements: {} });
+// Each slip has its own sportsbook (older slips: the group's book from before slips had one).
+const slipBook = (s, g) => s.book || g.sportsbook || 'fanduel';
+// Legs moving to another book: its odds and betslip links come from there now. Lines that book
+// doesn't offer show as pulled until someone swaps them out.
+function switchLegsBook(legs, book) {
+  for (const leg of legs) {
+    leg.book = book;
+    leg.eventLink = null; // the old book's game page
+    leg.newBook = true;   // its "was +120" restarts from the new book's price
+    delete leg.fd;
+    delete leg.fdTriedAt;
+  }
+}
 // Every change to a slip's legs bumps rev, so "Placed" taps from before a change can be flagged.
 const touchSlip = (s) => { s.rev = (s.rev || 0) + 1; };
 function migrateSlips() {
   let changed = false;
   for (const g of db.groups) {
     if (Array.isArray(g.slips) && g.slips.length) continue;
-    g.slips = [newSlip('Main slip', g.leaderId, g.legs || [])];
+    g.slips = [newSlip('Main slip', g.leaderId, g.sportsbook || 'fanduel', g.legs || [])];
     delete g.legs;
     changed = true;
   }
@@ -1504,18 +1517,8 @@ async function handleApi(req, res, url) {
     if (!isLeader) return send(res, 403, { error: 'Only the group leader can change the sportsbook.' });
     const { sportsbook } = await readBody(req);
     if (!SPORTSBOOKS.some((b) => b.key === sportsbook)) return send(res, 400, { error: 'That sportsbook isn’t supported yet.' });
-    if (group.sportsbook !== sportsbook) {
-      group.sportsbook = sportsbook;
-      // Every leg moves to the new book: its odds and betslip links come from there now. Lines the
-      // new book doesn't offer show as pulled until the group swaps them out.
-      for (const leg of group.slips.flatMap((s) => s.legs)) {
-        leg.book = sportsbook;
-        leg.eventLink = null; // the old book's game page
-        delete leg.fd;
-        delete leg.fdTriedAt;
-      }
-      try { await repriceLegs(group, false); } catch (err) { console.warn(`Re-pricing after book change: ${err.message}`); }
-    }
+    // Only the default for slips made before slips had their own book; each slip now picks its own.
+    group.sportsbook = sportsbook;
     save();
     notifyGroup(group.id, 'settings');
     return send(res, 200, { group: groupView(group) });
@@ -1640,13 +1643,16 @@ async function handleApi(req, res, url) {
       oddsAt: group.oddsAt || null,
       oddsEveryMinutes: SLIP_ODDS_MINUTES,
       slips: group.slips.map((s) => {
-        const link = parlayLink(s.legs.filter((l) => !l.unavailable), bookFor(group).key);
+        const book = bookByKey(slipBook(s, group));
+        const link = parlayLink(s.legs.filter((l) => !l.unavailable), book.key);
         return {
           ...s,
+          book: book.key,
+          bookTitle: book.title,
           legs: s.legs.map(({ fd, fdTriedAt, ...leg }) => ({ ...leg, link: legBetLink({ ...leg, fd }) })),
           // Place bet: load every leg FanDuel gave a betslip code for; the rest are listed to add by hand.
           placeBet: {
-            url: link.url || bookFor(group).home,
+            url: link.url || book.home,
             loadsSlip: !!link.url && !link.missing.length,
             linked: link.linked,
             missing: link.missing,
@@ -1674,9 +1680,11 @@ async function handleApi(req, res, url) {
     if (!canEditGroup(group, me.id)) return send(res, 403, { error: LOCKED_MSG });
     if (!isPro(me)) return proOnly(res, 'Making more slips');
     if (group.slips.length >= 20) return send(res, 400, { error: 'A group can have up to 20 slips. Delete one first.' });
-    const { error, clean } = slipNameProblem((await readBody(req)).name);
+    const body = await readBody(req);
+    const { error, clean } = slipNameProblem(body.name);
     if (error) return send(res, 400, { error });
-    const slip = newSlip(clean, me.id);
+    if (body.book && !SPORTSBOOKS.some((b) => b.key === body.book)) return send(res, 400, { error: 'That sportsbook isn’t supported yet.' });
+    const slip = newSlip(clean, me.id, body.book || bookFor(group).key);
     group.slips.push(slip);
     save();
     notifyGroup(group.id, 'slips');
@@ -1691,6 +1699,22 @@ async function handleApi(req, res, url) {
     ? isGroupEditor(group, me.id)
     : slip.createdBy === me.id || isLeader);
   const slipDenied = (verb) => (group.locked ? LOCKED_MSG : `Only the person who made this slip or the group leader can ${verb} it.`);
+
+  // Switch this slip to another sportsbook: its legs re-price from that book right away.
+  if (slip && slipSub === '/book' && req.method === 'POST') {
+    if (!canManageSlip) return send(res, 403, { error: slipDenied('change the sportsbook of') });
+    const { book } = await readBody(req);
+    if (!SPORTSBOOKS.some((b) => b.key === book)) return send(res, 400, { error: 'That sportsbook isn’t supported yet.' });
+    if (slipBook(slip, group) !== book) {
+      slip.book = book;
+      switchLegsBook(slip.legs, book);
+      touchSlip(slip);
+      try { await repriceLegs(group, false); } catch (err) { console.warn(`Re-pricing after book change: ${err.message}`); }
+    }
+    save();
+    notifyGroup(group.id, 'slips');
+    return send(res, 200, { ok: true, book, title: bookByKey(book).title });
+  }
 
   // Rename
   if (slip && slipSub === '' && req.method === 'PATCH') {
@@ -1736,10 +1760,10 @@ async function handleApi(req, res, url) {
     const { sport, eventId, market, key, note } = await readBody(req);
     if (!sportByKey(sport)) return send(res, 400, { error: 'Unknown sport.' });
     if (!isPro(me) && isProMarket(market)) return proOnly(res, marketLabel(sport, market));
-    const book = bookFor(group).key;
+    const book = slipBook(slip, group);
     const props = await getProps(sport, eventId, market, { book });
     const o = props.outcomes.find((x) => x.key === key);
-    if (!o) return send(res, 404, { error: ` no longer offers that line. Refresh and try again.` });
+    if (!o) return send(res, 404, { error: `${bookByKey(book).title} no longer offers that line. Refresh and try again.` });
     if (!isPro(me) && o.alt) return proOnly(res, 'Alternate lines');
     if (!isPro(me) && slip.legs.length >= FREE_LEG_LIMIT) return proOnly(res, `More than ${FREE_LEG_LIMIT} legs on a slip`);
     if (slip.legs.some((l) => l.eventId === eventId && l.market === market && l.key === key)) {
@@ -1820,6 +1844,11 @@ async function handleApi(req, res, url) {
     target.legs.push(leg);
     touchSlip(slip);
     touchSlip(target);
+    // Moving onto a slip with a different sportsbook: the leg takes that book's odds and links.
+    if (legBook(leg) !== slipBook(target, group)) {
+      switchLegsBook([leg], slipBook(target, group));
+      try { await repriceLegs(group, false); } catch (err) { console.warn(`Re-pricing a moved leg: ${err.message}`); }
+    }
     save();
     notifyGroup(group.id, 'legs');
     return send(res, 200, { ok: true, to: target.name });
@@ -1952,6 +1981,7 @@ async function repriceLegs(group, force) {
         eventLink: props.event.link || leg.eventLink || null,
         unavailable: false, oddsAt: new Date().toISOString(),
       });
+      if (leg.newBook) { leg.priceAtAdd = o.price; delete leg.newBook; }
     }
   }));
   // Betslip codes: fill in any that are missing; "Update odds now" fetches them all again.
